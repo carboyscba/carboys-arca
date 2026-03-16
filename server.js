@@ -89,8 +89,10 @@ function parseXml(xml) {
   });
 }
 
-// ── Create CMS (signed token request for WSAA) ──
+// ── Create CMS (signed token request for WSAA) using OpenSSL ──
 function createCMS(certPem, keyPem, service) {
+  const { execSync } = require('child_process');
+  const os = require('os');
   const now = new Date();
   const expiry = new Date(now.getTime() + 600000); // 10 min
 
@@ -104,32 +106,29 @@ function createCMS(certPem, keyPem, service) {
   <service>${service}</service>
 </loginTicketRequest>`;
 
-  // Create PKCS#7 signed data
-  const cert = forge.pki.certificateFromPem(certPem);
-  const key = forge.pki.privateKeyFromPem(keyPem);
+  // Write temp files
+  const tmpDir = os.tmpdir();
+  const traFile = `${tmpDir}/tra_${Date.now()}.xml`;
+  const cmsFile = `${tmpDir}/cms_${Date.now()}.cms`;
+  const certFile = `${tmpDir}/cert_${Date.now()}.pem`;
+  const keyFile = `${tmpDir}/key_${Date.now()}.pem`;
   
-  const p7 = forge.pkcs7.createSignedData();
-  p7.content = forge.util.createBuffer(tra, 'utf8');
-  p7.addCertificate(cert);
-  p7.addSigner({
-    key: key,
-    certificate: cert,
-    digestAlgorithm: forge.pki.oids.sha256,
-    authenticatedAttributes: [{
-      type: forge.pki.oids.contentType,
-      value: forge.pki.oids.data,
-    }, {
-      type: forge.pki.oids.messageDigest,
-    }, {
-      type: forge.pki.oids.signingTime,
-      value: now,
-    }]
-  });
-  p7.sign();
+  fs.writeFileSync(traFile, tra);
+  fs.writeFileSync(certFile, certPem);
+  fs.writeFileSync(keyFile, keyPem);
   
-  const asn1 = p7.toAsn1();
-  const der = forge.asn1.toDer(asn1);
-  return forge.util.encode64(der.getBytes());
+  try {
+    // Use OpenSSL to create PKCS#7 CMS signature (ARCA compatible)
+    execSync(`openssl cms -sign -in "${traFile}" -out "${cmsFile}" -signer "${certFile}" -inkey "${keyFile}" -outform DER -nodetach`, { stdio: 'pipe' });
+    const cms = fs.readFileSync(cmsFile);
+    return cms.toString('base64');
+  } finally {
+    // Cleanup temp files
+    try { fs.unlinkSync(traFile); } catch(e) {}
+    try { fs.unlinkSync(cmsFile); } catch(e) {}
+    try { fs.unlinkSync(certFile); } catch(e) {}
+    try { fs.unlinkSync(keyFile); } catch(e) {}
+  }
 }
 
 // ── WSAA: Get auth token ──
