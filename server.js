@@ -7,24 +7,24 @@ const forge = require('node-forge');
 const { parseString, Builder } = require('xml2js');
 const fs = require('fs');
 const path = require('path');
- 
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
- 
+
 // ── Config ──
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.ARCA_API_KEY || 'carboys-arca-2026';
 const IS_PRODUCTION = process.env.ARCA_ENV === 'production';
- 
+
 const WSAA_URL = IS_PRODUCTION 
   ? 'https://wsaa.afip.gov.ar/ws/services/LoginCms'
   : 'https://wsaahomo.afip.gov.ar/ws/services/LoginCms';
- 
+
 const WSFE_URL = IS_PRODUCTION
   ? 'https://servicios1.afip.gov.ar/wsfev1/service.asmx'
   : 'https://wswhomo.afip.gov.ar/wsfev1/service.asmx';
- 
+
 // ── Certificates (loaded from base64 env vars) ──
 const decodeEnv = (v) => v ? Buffer.from(v, 'base64').toString('utf8') : '';
 const ENTITIES = {
@@ -41,17 +41,17 @@ const ENTITIES = {
     key: decodeEnv(process.env.ENTITY2_KEY),
   }
 };
- 
+
 // ── Token cache (tokens last 12h) ──
 const tokenCache = {};
- 
+
 // ── Auth middleware ──
 const auth = (req, res, next) => {
   const key = req.headers['x-api-key'];
   if (key !== API_KEY) return res.status(401).json({ error: 'Unauthorized' });
   next();
 };
- 
+
 // ── SOAP request helper ──
 function soapRequest(url, body, soapAction) {
   return new Promise((resolve, reject) => {
@@ -79,7 +79,7 @@ function soapRequest(url, body, soapAction) {
     req.end();
   });
 }
- 
+
 // ── Parse XML helper ──
 function parseXml(xml) {
   return new Promise((resolve, reject) => {
@@ -88,14 +88,14 @@ function parseXml(xml) {
     });
   });
 }
- 
+
 // ── Create CMS (signed token request for WSAA) using OpenSSL ──
 function createCMS(certPem, keyPem, service) {
   const { execSync } = require('child_process');
   const os = require('os');
   const now = new Date();
   const expiry = new Date(now.getTime() + 600000); // 10 min
- 
+
   const tra = `<?xml version="1.0" encoding="UTF-8"?>
 <loginTicketRequest version="1.0">
   <header>
@@ -105,7 +105,7 @@ function createCMS(certPem, keyPem, service) {
   </header>
   <service>${service}</service>
 </loginTicketRequest>`;
- 
+
   // Write temp files
   const tmpDir = os.tmpdir();
   const traFile = `${tmpDir}/tra_${Date.now()}.xml`;
@@ -130,7 +130,7 @@ function createCMS(certPem, keyPem, service) {
     try { fs.unlinkSync(keyFile); } catch(e) {}
   }
 }
- 
+
 // ── WSAA: Get auth token ──
 async function getToken(entityId, service = 'wsfe') {
   const entity = ENTITIES[entityId];
@@ -157,7 +157,7 @@ async function getToken(entityId, service = 'wsfe') {
     </wsaa:loginCms>
   </soapenv:Body>
 </soapenv:Envelope>`;
- 
+
   const response = await soapRequest(WSAA_URL, soapBody, '');
   
   // Extract loginCmsReturn - try multiple approaches
@@ -188,7 +188,7 @@ async function getToken(entityId, service = 'wsfe') {
   console.log(`[WSAA] Token obtained for ${entity.name}, expires in ~12h`);
   return result;
 }
- 
+
 // ── WSFEv1: Get last invoice number ──
 async function getLastInvoiceNum(entityId, puntoVenta, tipoComprobante) {
   const auth = await getToken(entityId);
@@ -207,12 +207,12 @@ async function getLastInvoiceNum(entityId, puntoVenta, tipoComprobante) {
     </ar:FECompUltimoAutorizado>
   </soapenv:Body>
 </soapenv:Envelope>`;
- 
+
   const response = await soapRequest(WSFE_URL, soapBody, 'http://ar.gov.afip.dif.FEV1/FECompUltimoAutorizado');
   const match = response.match(/<CbteNro>([\d]+)<\/CbteNro>/);
   return match ? parseInt(match[1]) : 0;
 }
- 
+
 // ── WSFEv1: Create invoice (FECAESolicitar) ──
 async function createInvoice(entityId, invoiceData) {
   const authData = await getToken(entityId);
@@ -281,7 +281,7 @@ async function createInvoice(entityId, invoiceData) {
     </ar:FECAESolicitar>
   </soapenv:Body>
 </soapenv:Envelope>`;
- 
+
   console.log(`[WSFEv1] Creating invoice: PV=${puntoVenta} Tipo=${tipoComprobante} Nro=${nextNum} Total=${importeTotal}`);
   
   const response = await soapRequest(WSFE_URL, soapBody, 'http://ar.gov.afip.dif.FEV1/FECAESolicitar');
@@ -310,9 +310,9 @@ async function createInvoice(entityId, invoiceData) {
     };
   }
 }
- 
+
 // ═══════════ API ROUTES ═══════════
- 
+
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok',
@@ -326,7 +326,7 @@ app.get('/api/health', (req, res) => {
     }
   });
 });
- 
+
 // Get auth token (test connectivity)
 app.post('/api/auth', auth, async (req, res) => {
   try {
@@ -338,7 +338,7 @@ app.post('/api/auth', auth, async (req, res) => {
     res.status(500).json({ success: false, error: e.message });
   }
 });
- 
+
 // Get last invoice number
 app.post('/api/ultimo-comprobante', auth, async (req, res) => {
   try {
@@ -350,7 +350,7 @@ app.post('/api/ultimo-comprobante', auth, async (req, res) => {
     res.status(500).json({ success: false, error: e.message });
   }
 });
- 
+
 // Create invoice
 app.post('/api/facturar', auth, async (req, res) => {
   try {
@@ -385,7 +385,7 @@ app.post('/api/facturar', auth, async (req, res) => {
     res.status(500).json({ success: false, error: e.message });
   }
 });
- 
+
 // ═══════════ START ═══════════
 app.listen(PORT, () => {
   console.log(`\n🧾 CarBoys ARCA Server`);
