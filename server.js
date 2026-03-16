@@ -224,14 +224,21 @@ async function createInvoice(entityId, invoiceData) {
   
   const today = new Date().toISOString().split('T')[0].replace(/-/g, '');
   
-  // Build IVA array if needed
+  // For FC B (6) and C (11): no IVA discrimination, total goes to ImpTotConc
+  // For FC A (1): IVA discriminated, total = ImpNeto + ImpIVA
+  const isNoIva = tipoComprobante === 6 || tipoComprobante === 11;
+  const impTotConc = isNoIva ? importeTotal : 0;
+  const impNeto = isNoIva ? 0 : importeNeto;
+  const impIVA = isNoIva ? 0 : (importeIva || 0);
+  
+  // Build IVA array only for FC A
   let ivaXml = '';
-  if (importeIva > 0) {
+  if (!isNoIva && importeIva > 0) {
     ivaXml = `<ar:Iva>
         <ar:AlicIva>
           <ar:Id>5</ar:Id>
-          <ar:BaseImp>${importeNeto.toFixed(2)}</ar:BaseImp>
-          <ar:Importe>${importeIva.toFixed(2)}</ar:Importe>
+          <ar:BaseImp>${impNeto.toFixed(2)}</ar:BaseImp>
+          <ar:Importe>${impIVA.toFixed(2)}</ar:Importe>
         </ar:AlicIva>
       </ar:Iva>`;
   }
@@ -260,11 +267,11 @@ async function createInvoice(entityId, invoiceData) {
             <ar:CbteHasta>${nextNum}</ar:CbteHasta>
             <ar:CbteFch>${today}</ar:CbteFch>
             <ar:ImpTotal>${importeTotal.toFixed(2)}</ar:ImpTotal>
-            <ar:ImpTotConc>0.00</ar:ImpTotConc>
-            <ar:ImpNeto>${importeNeto.toFixed(2)}</ar:ImpNeto>
+            <ar:ImpTotConc>${impTotConc.toFixed(2)}</ar:ImpTotConc>
+            <ar:ImpNeto>${impNeto.toFixed(2)}</ar:ImpNeto>
             <ar:ImpOpEx>0.00</ar:ImpOpEx>
             <ar:ImpTrib>0.00</ar:ImpTrib>
-            <ar:ImpIVA>${(importeIva || 0).toFixed(2)}</ar:ImpIVA>
+            <ar:ImpIVA>${impIVA.toFixed(2)}</ar:ImpIVA>
             <ar:MonId>PES</ar:MonId>
             <ar:MonCotiz>1</ar:MonCotiz>
             ${ivaXml}
@@ -309,7 +316,7 @@ async function createInvoice(entityId, invoiceData) {
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok',
-    version: 'v3', 
+    version: 'v4', 
     env: IS_PRODUCTION ? 'production' : 'homologacion',
     wsaaUrl: WSAA_URL,
     wsfeUrl: WSFE_URL,
