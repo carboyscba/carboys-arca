@@ -64,7 +64,7 @@ function soapRequest(url, body, soapAction) {
       headers: {
         'Content-Type': 'text/xml; charset=utf-8',
         'Content-Length': Buffer.byteLength(body),
-        ...(soapAction ? { 'SOAPAction': soapAction } : {})
+        ...(soapAction !== undefined ? { 'SOAPAction': soapAction } : {})
       },
       rejectUnauthorized: false // AFIP certs can be tricky
     };
@@ -159,7 +159,7 @@ async function getToken(entityId, service = 'wsfe') {
   </soapenv:Body>
 </soapenv:Envelope>`;
 
-  const response = await soapRequest(WSAA_URL, soapBody);
+  const response = await soapRequest(WSAA_URL, soapBody, '');
   const parsed = await parseXml(response);
   
   // Extract loginCmsReturn
