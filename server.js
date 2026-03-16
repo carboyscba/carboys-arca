@@ -224,16 +224,19 @@ async function createInvoice(entityId, invoiceData) {
   
   const today = new Date().toISOString().split('T')[0].replace(/-/g, '');
   
-  // For FC B (6) and C (11): no IVA discrimination, total goes to ImpTotConc
-  // For FC A (1): IVA discriminated, total = ImpNeto + ImpIVA
-  const isNoIva = tipoComprobante === 6 || tipoComprobante === 11;
-  const impTotConc = isNoIva ? importeTotal : 0;
-  const impNeto = isNoIva ? 0 : importeNeto;
-  const impIVA = isNoIva ? 0 : (importeIva || 0);
+  // FC A (1): IVA discriminated → ImpNeto + ImpIVA = ImpTotal
+  // FC B (6): IVA included but not discriminated → total goes to ImpTotConc (no gravado)
+  // FC C (11): Monotributo, no IVA → total goes to ImpNeto
+  const isFCA = tipoComprobante === 1;
+  const isFCB = tipoComprobante === 6;
+  const isFCC = tipoComprobante === 11;
+  const impTotConc = isFCB ? importeTotal : 0;
+  const impNeto = isFCA ? importeNeto : (isFCC ? importeTotal : 0);
+  const impIVA = isFCA ? (importeIva || 0) : 0;
   
   // Build IVA array only for FC A
   let ivaXml = '';
-  if (!isNoIva && importeIva > 0) {
+  if (isFCA && importeIva > 0) {
     ivaXml = `<ar:Iva>
         <ar:AlicIva>
           <ar:Id>5</ar:Id>
@@ -303,10 +306,14 @@ async function createInvoice(entityId, invoiceData) {
       resultado: 'A'
     };
   } else {
+    // Extract errors from <Err> and observations from <Obs>
+    const obsMatches = [...response.matchAll(/<Obs>[\s\S]*?<Code>(\d+)<\/Code>[\s\S]*?<Msg>([\s\S]*?)<\/Msg>[\s\S]*?<\/Obs>/g)];
+    const obsMsg = obsMatches.map(m => `${m[1]}: ${m[2]}`).join(' | ');
+    const errMsg = errMatch ? `${errMatch[1]}: ${errMatch[2]}` : '';
     return {
       success: false,
-      error: errMatch ? `${errMatch[1]}: ${errMatch[2]}` : 'Error desconocido',
-      rawResponse: response.substring(0, 1000)
+      error: errMsg || obsMsg || 'Error desconocido',
+      rawResponse: response.substring(0, 2000)
     };
   }
 }
@@ -316,7 +323,7 @@ async function createInvoice(entityId, invoiceData) {
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok',
-    version: 'v4', 
+    version: 'v5', 
     env: IS_PRODUCTION ? 'production' : 'homologacion',
     wsaaUrl: WSAA_URL,
     wsfeUrl: WSFE_URL,
