@@ -26,8 +26,8 @@ const WSFE_URL = IS_PRODUCTION
   : 'https://wswhomo.afip.gov.ar/wsfev1/service.asmx';
 
 const PADRON_URL = IS_PRODUCTION
-  ? 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA5'
-  : 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA5';
+  ? 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA4'
+  : 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA4';
 
 // ── Certificates (loaded from base64 env vars) ──
 const decodeEnv = (v) => v ? Buffer.from(v, 'base64').toString('utf8') : '';
@@ -307,15 +307,15 @@ async function createInvoice(entityId, invoiceData) {
   }
 }
 
-// ── PADRON: Consulta datos fiscales via AFIP ws_sr_padron_a5 (autenticado) ──
+// ── PADRON: Consulta datos fiscales via AFIP ws_sr_padron_a4 (autenticado) ──
 async function consultarPadronAuth(entityId, cuitConsulta) {
   const cleanCuit = String(cuitConsulta).replace(/[^0-9]/g, '');
   if (!cleanCuit || cleanCuit.length < 7) throw new Error('CUIT inválido');
 
-  const authData = await getToken(entityId, 'ws_sr_padron_a5');
+  const authData = await getToken(entityId, 'ws_sr_padron_a4');
 
   const soapBody = `<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:per="http://a5.soap.ws.server.puc.sr.padron.afip.gob.ar/">
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:per="http://a4.soap.ws.server.puc.sr.padron.afip.gob.ar/">
   <soapenv:Body>
     <per:getPersona>
       <token>${authData.token}</token>
@@ -326,7 +326,7 @@ async function consultarPadronAuth(entityId, cuitConsulta) {
   </soapenv:Body>
 </soapenv:Envelope>`;
 
-  console.log(`[PADRON] Querying ws_sr_padron_a5 for CUIT ${cleanCuit} via entity ${entityId}`);
+  console.log(`[PADRON] Querying ws_sr_padron_a4 for CUIT ${cleanCuit} via entity ${entityId}`);
   const response = await soapRequest(PADRON_URL, soapBody, '');
 
   // Regex extraction (most robust approach for AFIP's variable XML)
@@ -427,7 +427,7 @@ async function consultarPadronPublico(cuit) {
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    version: 'v7',
+    version: 'v8',
     env: IS_PRODUCTION ? 'production' : 'homologacion',
     wsaaUrl: WSAA_URL,
     wsfeUrl: WSFE_URL,
@@ -490,7 +490,7 @@ app.post('/api/facturar', auth, async (req, res) => {
   }
 });
 
-// Padron lookup — tries authenticated ws_sr_padron_a5 first, then public API
+// Padron lookup — tries authenticated ws_sr_padron_a4 first, then public API
 app.get('/api/padron', auth, async (req, res) => {
   try {
     const cuit = req.query.cuit;
@@ -500,7 +500,7 @@ app.get('/api/padron', auth, async (req, res) => {
     const cleanCuit = String(cuit).replace(/[^0-9]/g, '');
     console.log(`[PADRON] Lookup CUIT ${cleanCuit} via entity ${entityId}`);
 
-    // Method 1: Authenticated ws_sr_padron_a5
+    // Method 1: Authenticated ws_sr_padron_a4
     try {
       const result = await consultarPadronAuth(entityId, cleanCuit);
       console.log(`[PADRON] ✅ Auth OK: ${result.nombre}`);
@@ -530,7 +530,7 @@ app.get('/api/padron', auth, async (req, res) => {
 
 // ═══════════ START ═══════════
 app.listen(PORT, () => {
-  console.log(`\n🧾 CarBoys ARCA Server v7`);
+  console.log(`\n🧾 CarBoys ARCA Server v8`);
   console.log(`  Port: ${PORT}`);
   console.log(`  Env: ${IS_PRODUCTION ? '🔴 PRODUCCION' : '🟡 HOMOLOGACION (testing)'}`);
   console.log(`  Entity 1: ${ENTITIES['1'].name} (${ENTITIES['1'].cuit}) — Cert: ${ENTITIES['1'].cert ? '✅' : '❌'}`);
