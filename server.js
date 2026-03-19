@@ -25,6 +25,10 @@ const WSFE_URL = IS_PRODUCTION
   ? 'https://servicios1.afip.gov.ar/wsfev1/service.asmx'
   : 'https://wswhomo.afip.gov.ar/wsfev1/service.asmx';
 
+const PADRON_URL = IS_PRODUCTION
+  ? 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA5'
+  : 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA5';
+
 // ── Certificates (loaded from base64 env vars) ──
 const decodeEnv = (v) => v ? Buffer.from(v, 'base64').toString('utf8') : '';
 
@@ -75,6 +79,7 @@ function soapRequest(url, body, soapAction) {
       res.on('end', () => resolve(data));
     });
     req.on('error', reject);
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error('Timeout')); });
     req.write(body);
     req.end();
   });
@@ -138,11 +143,11 @@ async function getToken(entityId, service = 'wsfe') {
 
   const cacheKey = `${entityId}_${service}`;
   if (tokenCache[cacheKey] && tokenCache[cacheKey].expiry > Date.now()) {
-    console.log(`[WSAA] Using cached token for entity ${entityId}`);
+    console.log(`[WSAA] Using cached token for entity ${entityId} service ${service}`);
     return tokenCache[cacheKey];
   }
 
-  console.log(`[WSAA] Requesting new token for entity ${entityId} (${entity.name})`);
+  console.log(`[WSAA] Requesting new token for entity ${entityId} (${entity.name}) service ${service}`);
   const cms = createCMS(entity.cert, entity.key, service);
 
   const soapBody = `<?xml version="1.0" encoding="UTF-8"?>
@@ -177,22 +182,22 @@ async function getToken(entityId, service = 'wsfe') {
   };
 
   tokenCache[cacheKey] = result;
-  console.log(`[WSAA] Token obtained for ${entity.name}, expires in ~12h`);
+  console.log(`[WSAA] Token obtained for ${entity.name} service ${service}`);
   return result;
 }
 
 // ── WSFEv1: Get last invoice number ──
 async function getLastInvoiceNum(entityId, puntoVenta, tipoComprobante) {
-  const auth = await getToken(entityId);
+  const authObj = await getToken(entityId);
 
   const soapBody = `<?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ar="http://ar.gov.afip.dif.FEV1/">
   <soapenv:Body>
     <ar:FECompUltimoAutorizado>
       <ar:Auth>
-        <ar:Token>${auth.token}</ar:Token>
-        <ar:Sign>${auth.sign}</ar:Sign>
-        <ar:Cuit>${auth.cuit}</ar:Cuit>
+        <ar:Token>${authObj.token}</ar:Token>
+        <ar:Sign>${authObj.sign}</ar:Sign>
+        <ar:Cuit>${authObj.cuit}</ar:Cuit>
       </ar:Auth>
       <ar:PtoVta>${puntoVenta}</ar:PtoVta>
       <ar:CbteTipo>${tipoComprobante}</ar:CbteTipo>
@@ -302,72 +307,131 @@ async function createInvoice(entityId, invoiceData) {
   }
 }
 
-// ── PADRON: Consulta datos fiscales del contribuyente via AFIP ──
-async function consultarPadron(cuit) {
-  const cleanCuit = String(cuit).replace(/[^0-9]/g, '');
-  if (!cleanCuit || cleanCuit.length < 7) throw new Error('CUIT/DNI inválido');
+// ── PADRON: Consulta datos fiscales via AFIP ws_sr_padron_a5 (autenticado) ──
+async function consultarPadronAuth(entityId, cuitConsulta) {
+  const cleanCuit = String(cuitConsulta).replace(/[^0-9]/g, '');
+  if (!cleanCuit || cleanCuit.length < 7) throw new Error('CUIT inválido');
 
-  const urls = [
-    `https://soa.afip.gob.ar/sr-padron/v2/persona/${cleanCuit}`,
-    `https://soa.afip.gob.ar/sr-padron/v1/persona/${cleanCuit}`,
-  ];
+  const authData = await getToken(entityId, 'ws_sr_padron_a5');
 
-  for (const url of urls) {
-    try {
-      const data = await new Promise((resolve, reject) => {
-        const req = https.get(url, { rejectUnauthorized: false, timeout: 8000 }, (res) => {
-          let body = '';
-          res.on('data', chunk => body += chunk);
-          res.on('end', () => {
-            try { resolve(JSON.parse(body)); } catch(e) { reject(new Error('Invalid JSON')); }
-          });
-        });
-        req.on('error', reject);
-        req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
-      });
+  const soapBody = `<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:per="http://a5.soap.ws.server.puc.sr.padron.afip.gob.ar/">
+  <soapenv:Body>
+    <per:getPersona>
+      <token>${authData.token}</token>
+      <sign>${authData.sign}</sign>
+      <cuitRepresentada>${authData.cuit}</cuitRepresentada>
+      <idPersona>${cleanCuit}</idPersona>
+    </per:getPersona>
+  </soapenv:Body>
+</soapenv:Envelope>`;
 
-      if (data.success !== false && (data.data || data.persona)) {
-        const p = data.data || data.persona || {};
-        const isTipoJuridica = p.tipoClave === 'CUIT' && p.tipoPersona === 'JURIDICA';
-        return {
-          success: true,
-          cuit: cleanCuit,
-          tipoPersona: p.tipoPersona || '',
-          nombre: isTipoJuridica ? (p.razonSocial || '') : `${p.apellido || ''} ${p.nombre || ''}`.trim(),
-          razonSocial: p.razonSocial || '',
-          apellido: p.apellido || '',
-          nombrePila: p.nombre || '',
-          domicilioFiscal: p.domicilioFiscal
-            ? `${p.domicilioFiscal.direccion || ''}, ${p.domicilioFiscal.localidad || ''}, ${p.domicilioFiscal.descripcionProvincia || ''}`.replace(/, ,/g, ',').replace(/^, |, $/g, '')
-            : '',
-          condIva: (() => {
-            const imp = (p.impuestos || []).find(i => i.idImpuesto === 32);
-            if (imp) return 'IVA Exento';
-            const iva = (p.impuestos || []).find(i => i.idImpuesto === 30);
-            if (iva) return 'Responsable Inscripto';
-            const mt = (p.impuestos || []).find(i => i.idImpuesto === 20);
-            if (mt) return 'Monotributo';
-            return 'Consumidor Final';
-          })(),
-        };
-      }
-    } catch(e) {
-      console.log(`[PADRON] ${url} failed:`, e.message);
-    }
+  console.log(`[PADRON] Querying ws_sr_padron_a5 for CUIT ${cleanCuit} via entity ${entityId}`);
+  const response = await soapRequest(PADRON_URL, soapBody, '');
+
+  // Regex extraction (most robust approach for AFIP's variable XML)
+  const razonSocial = response.match(/<razonSocial>([^<]*)<\/razonSocial>/);
+  const apellido = response.match(/<apellido>([^<]*)<\/apellido>/);
+  const nombre = response.match(/<nombre>([^<]*)<\/nombre>/);
+  const tipoPersona = response.match(/<tipoPersona>([^<]*)<\/tipoPersona>/);
+  const direccion = response.match(/<direccion>([^<]*)<\/direccion>/);
+  const localidad = response.match(/<localidad>([^<]*)<\/localidad>/);
+  const provincia = response.match(/<descripcionProvincia>([^<]*)<\/descripcionProvincia>/);
+
+  if (razonSocial || apellido || nombre) {
+    const isJuridica = tipoPersona && tipoPersona[1] === 'JURIDICA';
+    const fullName = isJuridica
+      ? (razonSocial ? razonSocial[1] : '')
+      : `${apellido ? apellido[1] : ''} ${nombre ? nombre[1] : ''}`.trim();
+
+    const domParts = [
+      direccion ? direccion[1] : '',
+      localidad ? localidad[1] : '',
+      provincia ? provincia[1] : ''
+    ].filter(Boolean);
+
+    const hasImp30 = response.includes('<idImpuesto>30</idImpuesto>');
+    const hasImp32 = response.includes('<idImpuesto>32</idImpuesto>');
+    const hasImp20 = response.includes('<idImpuesto>20</idImpuesto>');
+    const condIva = hasImp32 ? 'IVA Exento' : hasImp30 ? 'Responsable Inscripto' : hasImp20 ? 'Monotributo' : 'Consumidor Final';
+
+    return {
+      success: true,
+      cuit: cleanCuit,
+      tipoPersona: tipoPersona ? tipoPersona[1] : '',
+      nombre: fullName,
+      razonSocial: razonSocial ? razonSocial[1] : '',
+      apellido: apellido ? apellido[1] : '',
+      nombrePila: nombre ? nombre[1] : '',
+      domicilioFiscal: domParts.join(', '),
+      condIva,
+    };
   }
 
-  throw new Error('No se pudo consultar el padrón de AFIP para CUIT: ' + cleanCuit);
+  const faultMatch = response.match(/<faultstring>([^<]*)<\/faultstring>/);
+  if (faultMatch) throw new Error('AFIP Padron: ' + faultMatch[1]);
+
+  throw new Error('No se pudo obtener datos del padrón autenticado para CUIT: ' + cleanCuit + ' | Response: ' + response.substring(0, 300));
 }
+
+// ── PADRON: Fallback via API pública ──
+async function consultarPadronPublico(cuit) {
+  const cleanCuit = String(cuit).replace(/[^0-9]/g, '');
+  try {
+    const data = await new Promise((resolve, reject) => {
+      const req = https.get(`https://soa.afip.gob.ar/sr-padron/v2/persona/${cleanCuit}`, {
+        rejectUnauthorized: false,
+        timeout: 8000,
+        headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }
+      }, (res) => {
+        let body = '';
+        res.on('data', chunk => body += chunk);
+        res.on('end', () => {
+          try { resolve(JSON.parse(body)); } catch(e) { reject(new Error('Invalid JSON')); }
+        });
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+    });
+
+    if (data.success !== false && (data.data || data.persona)) {
+      const p = data.data || data.persona || {};
+      const isJuridica = p.tipoPersona === 'JURIDICA';
+      return {
+        success: true,
+        cuit: cleanCuit,
+        tipoPersona: p.tipoPersona || '',
+        nombre: isJuridica ? (p.razonSocial || '') : `${p.apellido || ''} ${p.nombre || ''}`.trim(),
+        razonSocial: p.razonSocial || '',
+        domicilioFiscal: p.domicilioFiscal
+          ? `${p.domicilioFiscal.direccion || ''}, ${p.domicilioFiscal.localidad || ''}, ${p.domicilioFiscal.descripcionProvincia || ''}`.replace(/, ,/g, ',').replace(/^, |, $/g, '')
+          : '',
+        condIva: (() => {
+          const imps = p.impuestos || [];
+          if (imps.some(i => i.idImpuesto === 32)) return 'IVA Exento';
+          if (imps.some(i => i.idImpuesto === 30)) return 'Responsable Inscripto';
+          if (imps.some(i => i.idImpuesto === 20)) return 'Monotributo';
+          return 'Consumidor Final';
+        })(),
+      };
+    }
+  } catch(e) {
+    console.log(`[PADRON-PUB] Public API failed:`, e.message);
+  }
+  return null;
+}
+
 
 // ═══════════ API ROUTES ═══════════
 
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    version: 'v6',
+    version: 'v7',
     env: IS_PRODUCTION ? 'production' : 'homologacion',
     wsaaUrl: WSAA_URL,
     wsfeUrl: WSFE_URL,
+    padronUrl: PADRON_URL,
     entities: {
       '1': { name: ENTITIES['1'].name, cuit: ENTITIES['1'].cuit, hasCert: !!ENTITIES['1'].cert },
       '2': { name: ENTITIES['2'].name, cuit: ENTITIES['2'].cuit, hasCert: !!ENTITIES['2'].cert },
@@ -426,29 +490,54 @@ app.post('/api/facturar', auth, async (req, res) => {
   }
 });
 
-// Padron lookup — consulta datos fiscales de AFIP
+// Padron lookup — tries authenticated ws_sr_padron_a5 first, then public API
 app.get('/api/padron', auth, async (req, res) => {
   try {
     const cuit = req.query.cuit;
+    const entityId = req.query.entity || '1';
     if (!cuit) return res.status(400).json({ success: false, error: 'Falta parámetro cuit' });
-    const result = await consultarPadron(cuit);
-    res.json(result);
+
+    const cleanCuit = String(cuit).replace(/[^0-9]/g, '');
+    console.log(`[PADRON] Lookup CUIT ${cleanCuit} via entity ${entityId}`);
+
+    // Method 1: Authenticated ws_sr_padron_a5
+    try {
+      const result = await consultarPadronAuth(entityId, cleanCuit);
+      console.log(`[PADRON] ✅ Auth OK: ${result.nombre}`);
+      return res.json(result);
+    } catch(authErr) {
+      console.log(`[PADRON] Auth method failed: ${authErr.message}`);
+    }
+
+    // Method 2: Public API fallback
+    try {
+      const pubResult = await consultarPadronPublico(cleanCuit);
+      if (pubResult) {
+        console.log(`[PADRON] ✅ Public OK: ${pubResult.nombre}`);
+        return res.json(pubResult);
+      }
+    } catch(pubErr) {
+      console.log(`[PADRON] Public method failed: ${pubErr.message}`);
+    }
+
+    res.status(404).json({ success: false, error: 'No se encontraron datos para CUIT: ' + cleanCuit });
   } catch(e) {
     console.error('[PADRON]', e.message);
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
+
 // ═══════════ START ═══════════
 app.listen(PORT, () => {
-  console.log(`\n🧾 CarBoys ARCA Server v6`);
+  console.log(`\n🧾 CarBoys ARCA Server v7`);
   console.log(`  Port: ${PORT}`);
   console.log(`  Env: ${IS_PRODUCTION ? '🔴 PRODUCCION' : '🟡 HOMOLOGACION (testing)'}`);
   console.log(`  Entity 1: ${ENTITIES['1'].name} (${ENTITIES['1'].cuit}) — Cert: ${ENTITIES['1'].cert ? '✅' : '❌'}`);
   console.log(`  Entity 2: ${ENTITIES['2'].name} (${ENTITIES['2'].cuit}) — Cert: ${ENTITIES['2'].cert ? '✅' : '❌'}`);
   console.log(`\n  Endpoints:`);
   console.log(`    GET  /api/health`);
-  console.log(`    GET  /api/padron?cuit=XXXX`);
+  console.log(`    GET  /api/padron?cuit=XXXX&entity=1`);
   console.log(`    POST /api/auth`);
   console.log(`    POST /api/ultimo-comprobante`);
   console.log(`    POST /api/facturar\n`);
