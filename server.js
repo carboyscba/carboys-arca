@@ -29,7 +29,7 @@ const PADRON_URL = IS_PRODUCTION
   ? 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA13'
   : 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA13';
 
-// ── Certificates (loaded from base64 env vars) ──
+// ── Certificates ──
 const decodeEnv = (v) => v ? Buffer.from(v, 'base64').toString('utf8') : '';
 
 const ENTITIES = {
@@ -47,17 +47,14 @@ const ENTITIES = {
   }
 };
 
-// ── Token cache (tokens last 12h) ──
 const tokenCache = {};
 
-// ── Auth middleware ──
 const auth = (req, res, next) => {
   const key = req.headers['x-api-key'];
   if (key !== API_KEY) return res.status(401).json({ error: 'Unauthorized' });
   next();
 };
 
-// ── SOAP request helper ──
 function soapRequest(url, body, soapAction) {
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url);
@@ -85,7 +82,6 @@ function soapRequest(url, body, soapAction) {
   });
 }
 
-// ── Parse XML helper ──
 function parseXml(xml) {
   return new Promise((resolve, reject) => {
     parseString(xml, { explicitArray: false, ignoreAttrs: false }, (err, result) => {
@@ -94,11 +90,9 @@ function parseXml(xml) {
   });
 }
 
-// ── Create CMS (signed token request for WSAA) using OpenSSL ──
 function createCMS(certPem, keyPem, service) {
   const { execSync } = require('child_process');
   const os = require('os');
-
   const now = new Date();
   const expiry = new Date(now.getTime() + 600000);
 
@@ -113,10 +107,11 @@ function createCMS(certPem, keyPem, service) {
 </loginTicketRequest>`;
 
   const tmpDir = os.tmpdir();
-  const traFile = `${tmpDir}/tra_${Date.now()}.xml`;
-  const cmsFile = `${tmpDir}/cms_${Date.now()}.cms`;
-  const certFile = `${tmpDir}/cert_${Date.now()}.pem`;
-  const keyFile = `${tmpDir}/key_${Date.now()}.pem`;
+  const ts = Date.now();
+  const traFile = `${tmpDir}/tra_${ts}.xml`;
+  const cmsFile = `${tmpDir}/cms_${ts}.cms`;
+  const certFile = `${tmpDir}/cert_${ts}.pem`;
+  const keyFile = `${tmpDir}/key_${ts}.pem`;
 
   fs.writeFileSync(traFile, tra);
   fs.writeFileSync(certFile, certPem);
@@ -134,20 +129,17 @@ function createCMS(certPem, keyPem, service) {
   }
 }
 
-// ── WSAA: Get auth token ──
 async function getToken(entityId, service = 'wsfe') {
   const entity = ENTITIES[entityId];
-  if (!entity || !entity.cert || !entity.key) {
-    throw new Error(`Entity ${entityId} not configured`);
-  }
+  if (!entity || !entity.cert || !entity.key) throw new Error(`Entity ${entityId} not configured`);
 
   const cacheKey = `${entityId}_${service}`;
   if (tokenCache[cacheKey] && tokenCache[cacheKey].expiry > Date.now()) {
-    console.log(`[WSAA] Using cached token for entity ${entityId} service ${service}`);
+    console.log(`[WSAA] Cached token for entity ${entityId} service ${service}`);
     return tokenCache[cacheKey];
   }
 
-  console.log(`[WSAA] Requesting new token for entity ${entityId} (${entity.name}) service ${service}`);
+  console.log(`[WSAA] New token for entity ${entityId} (${entity.name}) service ${service}`);
   const cms = createCMS(entity.cert, entity.key, service);
 
   const soapBody = `<?xml version="1.0" encoding="UTF-8"?>
@@ -160,19 +152,17 @@ async function getToken(entityId, service = 'wsfe') {
 </soapenv:Envelope>`;
 
   const response = await soapRequest(WSAA_URL, soapBody, '');
-
   let credXml = '';
   const match = response.match(/<loginCmsReturn>([\s\S]*?)<\/loginCmsReturn>/);
   if (match) {
     credXml = match[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
   }
-  if (!credXml) throw new Error('WSAA: Could not find loginCmsReturn: ' + response.substring(0, 500));
+  if (!credXml) throw new Error('WSAA: No loginCmsReturn: ' + response.substring(0, 500));
 
   const tokenMatch = credXml.match(/<token>([\s\S]*?)<\/token>/);
   const signMatch = credXml.match(/<sign>([\s\S]*?)<\/sign>/);
   const expiryMatch = credXml.match(/<expirationTime>([\s\S]*?)<\/expirationTime>/);
-
-  if (!tokenMatch || !signMatch) throw new Error('WSAA: No credentials in response: ' + credXml.substring(0, 300));
+  if (!tokenMatch || !signMatch) throw new Error('WSAA: No credentials: ' + credXml.substring(0, 300));
 
   const result = {
     token: tokenMatch[1].trim(),
@@ -180,41 +170,31 @@ async function getToken(entityId, service = 'wsfe') {
     cuit: entity.cuit,
     expiry: expiryMatch ? new Date(expiryMatch[1].trim()).getTime() - 60000 : Date.now() + 36000000
   };
-
   tokenCache[cacheKey] = result;
-  console.log(`[WSAA] Token obtained for ${entity.name} service ${service}`);
+  console.log(`[WSAA] Token OK for ${entity.name} service ${service}`);
   return result;
 }
 
-// ── WSFEv1: Get last invoice number ──
 async function getLastInvoiceNum(entityId, puntoVenta, tipoComprobante) {
   const authObj = await getToken(entityId);
-
   const soapBody = `<?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ar="http://ar.gov.afip.dif.FEV1/">
   <soapenv:Body>
     <ar:FECompUltimoAutorizado>
-      <ar:Auth>
-        <ar:Token>${authObj.token}</ar:Token>
-        <ar:Sign>${authObj.sign}</ar:Sign>
-        <ar:Cuit>${authObj.cuit}</ar:Cuit>
-      </ar:Auth>
+      <ar:Auth><ar:Token>${authObj.token}</ar:Token><ar:Sign>${authObj.sign}</ar:Sign><ar:Cuit>${authObj.cuit}</ar:Cuit></ar:Auth>
       <ar:PtoVta>${puntoVenta}</ar:PtoVta>
       <ar:CbteTipo>${tipoComprobante}</ar:CbteTipo>
     </ar:FECompUltimoAutorizado>
   </soapenv:Body>
 </soapenv:Envelope>`;
-
   const response = await soapRequest(WSFE_URL, soapBody, 'http://ar.gov.afip.dif.FEV1/FECompUltimoAutorizado');
   const matchNum = response.match(/<CbteNro>([\d]+)<\/CbteNro>/);
   return matchNum ? parseInt(matchNum[1]) : 0;
 }
 
-// ── WSFEv1: Create invoice (FECAESolicitar) ──
 async function createInvoice(entityId, invoiceData) {
   const authData = await getToken(entityId);
-  const { puntoVenta, tipoComprobante, concepto, docTipo, docNro, importeTotal, importeNeto, importeIva } = invoiceData;
-
+  const { puntoVenta, tipoComprobante, concepto, docTipo, docNro, importeTotal, importeNeto, importeIva, fchServDesde, fchServHasta, fchVtoPago } = invoiceData;
   const lastNum = await getLastInvoiceNum(entityId, puntoVenta, tipoComprobante);
   const nextNum = lastNum + 1;
   const today = new Date().toISOString().split('T')[0].replace(/-/g, '');
@@ -229,38 +209,37 @@ async function createInvoice(entityId, invoiceData) {
 
   let ivaXml = '';
   if (isFCA && importeIva > 0) {
-    ivaXml = `<ar:Iva>
-              <ar:AlicIva>
-                <ar:Id>5</ar:Id>
-                <ar:BaseImp>${impNeto.toFixed(2)}</ar:BaseImp>
-                <ar:Importe>${impIVA.toFixed(2)}</ar:Importe>
-              </ar:AlicIva>
-            </ar:Iva>`;
+    ivaXml = `<ar:Iva><ar:AlicIva><ar:Id>5</ar:Id><ar:BaseImp>${impNeto.toFixed(2)}</ar:BaseImp><ar:Importe>${impIVA.toFixed(2)}</ar:Importe></ar:AlicIva></ar:Iva>`;
+  }
+
+  // Fechas de servicio obligatorias para concepto 2 (Servicios) y 3 (Productos y Servicios)
+  const cpto = concepto || 1;
+  let fechasXml = '';
+  if (cpto === 2 || cpto === 3) {
+    const desde = fchServDesde || today;
+    const hasta = fchServHasta || today;
+    const vtoPago = fchVtoPago || today;
+    fechasXml = `
+            <ar:FchServDesde>${desde}</ar:FchServDesde>
+            <ar:FchServHasta>${hasta}</ar:FchServHasta>
+            <ar:FchVtoPago>${vtoPago}</ar:FchVtoPago>`;
   }
 
   const soapBody = `<?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ar="http://ar.gov.afip.dif.FEV1/">
   <soapenv:Body>
     <ar:FECAESolicitar>
-      <ar:Auth>
-        <ar:Token>${authData.token}</ar:Token>
-        <ar:Sign>${authData.sign}</ar:Sign>
-        <ar:Cuit>${authData.cuit}</ar:Cuit>
-      </ar:Auth>
+      <ar:Auth><ar:Token>${authData.token}</ar:Token><ar:Sign>${authData.sign}</ar:Sign><ar:Cuit>${authData.cuit}</ar:Cuit></ar:Auth>
       <ar:FeCAEReq>
-        <ar:FeCabReq>
-          <ar:CantReg>1</ar:CantReg>
-          <ar:PtoVta>${puntoVenta}</ar:PtoVta>
-          <ar:CbteTipo>${tipoComprobante}</ar:CbteTipo>
-        </ar:FeCabReq>
+        <ar:FeCabReq><ar:CantReg>1</ar:CantReg><ar:PtoVta>${puntoVenta}</ar:PtoVta><ar:CbteTipo>${tipoComprobante}</ar:CbteTipo></ar:FeCabReq>
         <ar:FeDetReq>
           <ar:FECAEDetRequest>
-            <ar:Concepto>${concepto || 1}</ar:Concepto>
+            <ar:Concepto>${cpto}</ar:Concepto>
             <ar:DocTipo>${docTipo}</ar:DocTipo>
             <ar:DocNro>${docNro}</ar:DocNro>
             <ar:CbteDesde>${nextNum}</ar:CbteDesde>
             <ar:CbteHasta>${nextNum}</ar:CbteHasta>
-            <ar:CbteFch>${today}</ar:CbteFch>
+            <ar:CbteFch>${today}</ar:CbteFch>${fechasXml}
             <ar:ImpTotal>${importeTotal.toFixed(2)}</ar:ImpTotal>
             <ar:ImpTotConc>${impTotConc.toFixed(2)}</ar:ImpTotConc>
             <ar:ImpNeto>${impNeto.toFixed(2)}</ar:ImpNeto>
@@ -277,7 +256,7 @@ async function createInvoice(entityId, invoiceData) {
   </soapenv:Body>
 </soapenv:Envelope>`;
 
-  console.log(`[WSFEv1] Creating invoice: PV=${puntoVenta} Tipo=${tipoComprobante} Nro=${nextNum} Total=${importeTotal}`);
+  console.log(`[WSFEv1] Invoice: PV=${puntoVenta} Tipo=${tipoComprobante} Nro=${nextNum} Total=${importeTotal}`);
   const response = await soapRequest(WSFE_URL, soapBody, 'http://ar.gov.afip.dif.FEV1/FECAESolicitar');
 
   const caeMatch = response.match(/<CAE>([\d]+)<\/CAE>/);
@@ -286,50 +265,81 @@ async function createInvoice(entityId, invoiceData) {
   const errMatch = response.match(/<Err>.*?<Code>(\d+)<\/Code>.*?<Msg>(.*?)<\/Msg>/s);
 
   if (resultMatch && resultMatch[1] === 'A' && caeMatch) {
-    return {
-      success: true,
-      cae: caeMatch[1],
-      caeVto: vtoMatch ? vtoMatch[1] : '',
-      cbteNro: nextNum,
-      cbteTipo: tipoComprobante,
-      puntoVenta: puntoVenta,
-      resultado: 'A'
-    };
+    return { success: true, cae: caeMatch[1], caeVto: vtoMatch ? vtoMatch[1] : '', cbteNro: nextNum, cbteTipo: tipoComprobante, puntoVenta, resultado: 'A' };
   } else {
     const obsMatches = [...response.matchAll(/<Obs>[\s\S]*?<Code>(\d+)<\/Code>[\s\S]*?<Msg>([\s\S]*?)<\/Msg>[\s\S]*?<\/Obs>/g)];
     const obsMsg = obsMatches.map(m => `${m[1]}: ${m[2]}`).join(' | ');
     const errMsg = errMatch ? `${errMatch[1]}: ${errMatch[2]}` : '';
-    return {
-      success: false,
-      error: errMsg || obsMsg || 'Error desconocido',
-      rawResponse: response.substring(0, 2000)
-    };
+    return { success: false, error: errMsg || obsMsg || 'Error desconocido', rawResponse: response.substring(0, 2000) };
   }
 }
 
-// ── PADRON: Consulta datos fiscales via AFIP ws_sr_padron_a13 (autenticado) ──
+// ════════════════════════════════════════════════════════════════════
+// PADRON A13 — Namespace CORRECTO: http://a13.soap.ws.server.puc.sr/
+// ════════════════════════════════════════════════════════════════════
 async function consultarPadronAuth(entityId, cuitConsulta) {
   const cleanCuit = String(cuitConsulta).replace(/[^0-9]/g, '');
-  if (!cleanCuit || cleanCuit.length < 7) throw new Error('CUIT inválido');
+  if (!cleanCuit || cleanCuit.length < 7) throw new Error('CUIT invalido');
 
   const authData = await getToken(entityId, 'ws_sr_padron_a13');
 
   const soapBody = `<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:per="http://a13.soap.ws.server.puc.sr.padron.afip.gob.ar/">
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:a13="http://a13.soap.ws.server.puc.sr/">
+  <soapenv:Header/>
   <soapenv:Body>
-    <per:getPersona>
+    <a13:getPersona>
       <token>${authData.token}</token>
       <sign>${authData.sign}</sign>
       <cuitRepresentada>${authData.cuit}</cuitRepresentada>
       <idPersona>${cleanCuit}</idPersona>
-    </per:getPersona>
+    </a13:getPersona>
   </soapenv:Body>
 </soapenv:Envelope>`;
 
-  console.log(`[PADRON] Querying ws_sr_padron_a13 for CUIT ${cleanCuit} via entity ${entityId}`);
+  console.log(`[PADRON-A13] Query CUIT ${cleanCuit} via entity ${entityId}`);
   const response = await soapRequest(PADRON_URL, soapBody, '');
+  console.log(`[PADRON-A13] Response (500): ${response.substring(0, 500)}`);
 
-  // Regex extraction (most robust approach for AFIP's variable XML)
+  const faultMatch = response.match(/<faultstring>([^<]*)<\/faultstring>/);
+  if (faultMatch) throw new Error('A13 fault: ' + faultMatch[1]);
+
+  return extractPadronData(response, cleanCuit, 'ws_sr_padron_a13');
+}
+
+// ── Constancia de inscripcion fallback ──
+async function consultarConstancia(entityId, cuitConsulta) {
+  const cleanCuit = String(cuitConsulta).replace(/[^0-9]/g, '');
+  const CONSTANCIA_URL = IS_PRODUCTION
+    ? 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA5'
+    : 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA5';
+
+  const authData = await getToken(entityId, 'ws_sr_constancia_inscripcion');
+
+  const soapBody = `<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:a5="http://a5.soap.ws.server.puc.sr/">
+  <soapenv:Header/>
+  <soapenv:Body>
+    <a5:getPersona_v2>
+      <token>${authData.token}</token>
+      <sign>${authData.sign}</sign>
+      <cuitRepresentada>${authData.cuit}</cuitRepresentada>
+      <idPersona>${cleanCuit}</idPersona>
+    </a5:getPersona_v2>
+  </soapenv:Body>
+</soapenv:Envelope>`;
+
+  console.log(`[PADRON-CI] Query CUIT ${cleanCuit}`);
+  const response = await soapRequest(CONSTANCIA_URL, soapBody, '');
+  console.log(`[PADRON-CI] Response (500): ${response.substring(0, 500)}`);
+
+  const faultMatch = response.match(/<faultstring>([^<]*)<\/faultstring>/);
+  if (faultMatch) throw new Error('Constancia fault: ' + faultMatch[1]);
+
+  return extractPadronData(response, cleanCuit, 'ws_sr_constancia_inscripcion');
+}
+
+// ── Shared extraction logic ──
+function extractPadronData(response, cleanCuit, source) {
   const razonSocial = response.match(/<razonSocial>([^<]*)<\/razonSocial>/);
   const apellido = response.match(/<apellido>([^<]*)<\/apellido>/);
   const nombre = response.match(/<nombre>([^<]*)<\/nombre>/);
@@ -337,101 +347,54 @@ async function consultarPadronAuth(entityId, cuitConsulta) {
   const direccion = response.match(/<direccion>([^<]*)<\/direccion>/);
   const localidad = response.match(/<localidad>([^<]*)<\/localidad>/);
   const provincia = response.match(/<descripcionProvincia>([^<]*)<\/descripcionProvincia>/);
+  const codPostal = response.match(/<codPostal>([^<]*)<\/codPostal>/);
 
-  if (razonSocial || apellido || nombre) {
-    const isJuridica = tipoPersona && tipoPersona[1] === 'JURIDICA';
-    const fullName = isJuridica
-      ? (razonSocial ? razonSocial[1] : '')
-      : `${apellido ? apellido[1] : ''} ${nombre ? nombre[1] : ''}`.trim();
-
-    const domParts = [
-      direccion ? direccion[1] : '',
-      localidad ? localidad[1] : '',
-      provincia ? provincia[1] : ''
-    ].filter(Boolean);
-
-    const hasImp30 = response.includes('<idImpuesto>30</idImpuesto>');
-    const hasImp32 = response.includes('<idImpuesto>32</idImpuesto>');
-    const hasImp20 = response.includes('<idImpuesto>20</idImpuesto>');
-    const condIva = hasImp32 ? 'IVA Exento' : hasImp30 ? 'Responsable Inscripto' : hasImp20 ? 'Monotributo' : 'Consumidor Final';
-
-    return {
-      success: true,
-      cuit: cleanCuit,
-      tipoPersona: tipoPersona ? tipoPersona[1] : '',
-      nombre: fullName,
-      razonSocial: razonSocial ? razonSocial[1] : '',
-      apellido: apellido ? apellido[1] : '',
-      nombrePila: nombre ? nombre[1] : '',
-      domicilioFiscal: domParts.join(', '),
-      condIva,
-    };
+  if (!razonSocial && !apellido && !nombre) {
+    throw new Error('No data in ' + source + ' response: ' + response.substring(0, 300));
   }
 
-  const faultMatch = response.match(/<faultstring>([^<]*)<\/faultstring>/);
-  if (faultMatch) throw new Error('AFIP Padron: ' + faultMatch[1]);
+  const isJuridica = tipoPersona && tipoPersona[1] === 'JURIDICA';
+  const fullName = isJuridica
+    ? (razonSocial ? razonSocial[1] : '')
+    : `${apellido ? apellido[1] : ''} ${nombre ? nombre[1] : ''}`.trim();
 
-  throw new Error('No se pudo obtener datos del padrón autenticado para CUIT: ' + cleanCuit + ' | Response: ' + response.substring(0, 300));
-}
+  const domParts = [
+    direccion ? direccion[1] : '',
+    localidad ? localidad[1] : '',
+    provincia ? provincia[1] : '',
+    codPostal ? `CP ${codPostal[1]}` : '',
+  ].filter(Boolean);
 
-// ── PADRON: Fallback via API pública ──
-async function consultarPadronPublico(cuit) {
-  const cleanCuit = String(cuit).replace(/[^0-9]/g, '');
-  try {
-    const data = await new Promise((resolve, reject) => {
-      const req = https.get(`https://soa.afip.gob.ar/sr-padron/v2/persona/${cleanCuit}`, {
-        rejectUnauthorized: false,
-        timeout: 8000,
-        headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }
-      }, (res) => {
-        let body = '';
-        res.on('data', chunk => body += chunk);
-        res.on('end', () => {
-          try { resolve(JSON.parse(body)); } catch(e) { reject(new Error('Invalid JSON')); }
-        });
-      });
-      req.on('error', reject);
-      req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
-    });
+  const hasImp30 = response.includes('<idImpuesto>30</idImpuesto>');
+  const hasImp32 = response.includes('<idImpuesto>32</idImpuesto>');
+  const hasImp20 = response.includes('<idImpuesto>20</idImpuesto>');
+  const condIva = hasImp32 ? 'IVA Exento'
+    : hasImp30 ? 'Responsable Inscripto'
+    : hasImp20 ? 'Monotributo'
+    : 'Consumidor Final';
 
-    if (data.success !== false && (data.data || data.persona)) {
-      const p = data.data || data.persona || {};
-      const isJuridica = p.tipoPersona === 'JURIDICA';
-      return {
-        success: true,
-        cuit: cleanCuit,
-        tipoPersona: p.tipoPersona || '',
-        nombre: isJuridica ? (p.razonSocial || '') : `${p.apellido || ''} ${p.nombre || ''}`.trim(),
-        razonSocial: p.razonSocial || '',
-        domicilioFiscal: p.domicilioFiscal
-          ? `${p.domicilioFiscal.direccion || ''}, ${p.domicilioFiscal.localidad || ''}, ${p.domicilioFiscal.descripcionProvincia || ''}`.replace(/, ,/g, ',').replace(/^, |, $/g, '')
-          : '',
-        condIva: (() => {
-          const imps = p.impuestos || [];
-          if (imps.some(i => i.idImpuesto === 32)) return 'IVA Exento';
-          if (imps.some(i => i.idImpuesto === 30)) return 'Responsable Inscripto';
-          if (imps.some(i => i.idImpuesto === 20)) return 'Monotributo';
-          return 'Consumidor Final';
-        })(),
-      };
-    }
-  } catch(e) {
-    console.log(`[PADRON-PUB] Public API failed:`, e.message);
-  }
-  return null;
+  return {
+    success: true,
+    source,
+    cuit: cleanCuit,
+    tipoPersona: tipoPersona ? tipoPersona[1] : '',
+    nombre: fullName,
+    razonSocial: razonSocial ? razonSocial[1] : '',
+    apellido: apellido ? apellido[1] : '',
+    nombrePila: nombre ? nombre[1] : '',
+    domicilioFiscal: domParts.join(', '),
+    condIva,
+  };
 }
 
 
-// ═══════════ API ROUTES ═══════════
+// ═══════════════════ API ROUTES ═══════════════════
 
 app.get('/api/health', (req, res) => {
   res.json({
-    status: 'ok',
-    version: 'v10',
+    status: 'ok', version: 'v11',
     env: IS_PRODUCTION ? 'production' : 'homologacion',
-    wsaaUrl: WSAA_URL,
-    wsfeUrl: WSFE_URL,
-    padronUrl: PADRON_URL,
+    wsaaUrl: WSAA_URL, wsfeUrl: WSFE_URL, padronUrl: PADRON_URL,
     entities: {
       '1': { name: ENTITIES['1'].name, cuit: ENTITIES['1'].cuit, hasCert: !!ENTITIES['1'].cert },
       '2': { name: ENTITIES['2'].name, cuit: ENTITIES['2'].cuit, hasCert: !!ENTITIES['2'].cert },
@@ -443,11 +406,8 @@ app.post('/api/auth', auth, async (req, res) => {
   try {
     const { entityId } = req.body;
     const token = await getToken(entityId || '1');
-    res.json({ success: true, message: 'Autenticación exitosa', cuit: token.cuit });
-  } catch (e) {
-    console.error('[AUTH]', e.message);
-    res.status(500).json({ success: false, error: e.message });
-  }
+    res.json({ success: true, message: 'Auth OK', cuit: token.cuit });
+  } catch (e) { console.error('[AUTH]', e.message); res.status(500).json({ success: false, error: e.message }); }
 });
 
 app.post('/api/ultimo-comprobante', auth, async (req, res) => {
@@ -455,90 +415,101 @@ app.post('/api/ultimo-comprobante', auth, async (req, res) => {
     const { entityId, puntoVenta, tipoComprobante } = req.body;
     const num = await getLastInvoiceNum(entityId || '1', puntoVenta || 1, tipoComprobante || 1);
     res.json({ success: true, lastNumber: num });
-  } catch (e) {
-    console.error('[ULTIMO]', e.message);
-    res.status(500).json({ success: false, error: e.message });
-  }
+  } catch (e) { console.error('[ULTIMO]', e.message); res.status(500).json({ success: false, error: e.message }); }
 });
 
 app.post('/api/facturar', auth, async (req, res) => {
   try {
-    const { entityId, puntoVenta, tipoFactura, docTipo, docNro, importeTotal, importeNeto, importeIva, concepto } = req.body;
+    const { entityId, puntoVenta, tipoFactura, docTipo, docNro, importeTotal, importeNeto, importeIva, concepto, fchServDesde, fchServHasta, fchVtoPago } = req.body;
     const tipoMap = { 'A': 1, 'B': 6, 'C': 11 };
-    const tipoComprobante = tipoMap[tipoFactura] || 6;
-
     const result = await createInvoice(entityId || '1', {
       puntoVenta: parseInt(puntoVenta) || 1,
-      tipoComprobante,
+      tipoComprobante: tipoMap[tipoFactura] || 6,
       concepto: concepto || 1,
       docTipo: parseInt(docTipo) || 99,
       docNro: parseInt(docNro) || 0,
       importeTotal: parseFloat(importeTotal) || 0,
       importeNeto: parseFloat(importeNeto) || 0,
       importeIva: parseFloat(importeIva) || 0,
+      fchServDesde: fchServDesde || '',
+      fchServHasta: fchServHasta || '',
+      fchVtoPago: fchVtoPago || '',
     });
-
-    if (result.success) {
-      console.log(`[FACTURA] ✅ CAE: ${result.cae} | Nro: ${result.cbteNro}`);
-    } else {
-      console.log(`[FACTURA] ❌ Error: ${result.error}`);
-    }
+    console.log(result.success ? `[FC] ✅ CAE: ${result.cae} Nro: ${result.cbteNro}` : `[FC] ❌ ${result.error}`);
     res.json(result);
-  } catch (e) {
-    console.error('[FACTURAR]', e.message);
-    res.status(500).json({ success: false, error: e.message });
-  }
+  } catch (e) { console.error('[FACTURAR]', e.message); res.status(500).json({ success: false, error: e.message }); }
 });
 
-// Padron lookup — tries authenticated ws_sr_padron_a13 first, then public API
+// ══════════════════════════════════════════
+// PADRON — 2 metodos autenticados con fallback
+// ══════════════════════════════════════════
 app.get('/api/padron', auth, async (req, res) => {
   try {
     const cuit = req.query.cuit;
     const entityId = req.query.entity || '1';
-    if (!cuit) return res.status(400).json({ success: false, error: 'Falta parámetro cuit' });
+    if (!cuit) return res.status(400).json({ success: false, error: 'Falta cuit' });
 
     const cleanCuit = String(cuit).replace(/[^0-9]/g, '');
-    console.log(`[PADRON] Lookup CUIT ${cleanCuit} via entity ${entityId}`);
+    console.log(`[PADRON] ══ Lookup ${cleanCuit} entity ${entityId} ══`);
 
-    // Method 1: Authenticated ws_sr_padron_a13
+    // Method 1: ws_sr_padron_a13
     try {
-      const result = await consultarPadronAuth(entityId, cleanCuit);
-      console.log(`[PADRON] ✅ Auth OK: ${result.nombre}`);
-      return res.json(result);
-    } catch(authErr) {
-      console.log(`[PADRON] Auth method failed: ${authErr.message}`);
-    }
+      const r = await consultarPadronAuth(entityId, cleanCuit);
+      console.log(`[PADRON] ✅ A13: ${r.nombre} | ${r.condIva}`);
+      return res.json(r);
+    } catch(e) { console.log(`[PADRON] ⚠ A13: ${e.message}`); }
 
-    // Method 2: Public API fallback
+    // Method 2: ws_sr_constancia_inscripcion
     try {
-      const pubResult = await consultarPadronPublico(cleanCuit);
-      if (pubResult) {
-        console.log(`[PADRON] ✅ Public OK: ${pubResult.nombre}`);
-        return res.json(pubResult);
-      }
-    } catch(pubErr) {
-      console.log(`[PADRON] Public method failed: ${pubErr.message}`);
-    }
+      const r = await consultarConstancia(entityId, cleanCuit);
+      console.log(`[PADRON] ✅ CI: ${r.nombre} | ${r.condIva}`);
+      return res.json(r);
+    } catch(e) { console.log(`[PADRON] ⚠ CI: ${e.message}`); }
 
-    res.status(404).json({ success: false, error: 'No se encontraron datos para CUIT: ' + cleanCuit });
+    console.log(`[PADRON] ❌ All failed for ${cleanCuit}`);
+    res.status(404).json({
+      success: false,
+      error: 'No se pudieron obtener datos para CUIT: ' + cleanCuit,
+      hint: 'Verifica que ws_sr_padron_a13 y/o ws_sr_constancia_inscripcion esten habilitados en AFIP para el certificado digital'
+    });
   } catch(e) {
     console.error('[PADRON]', e.message);
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
+// ── Debug endpoint ──
+app.get('/api/padron-test', auth, async (req, res) => {
+  const entityId = req.query.entity || '1';
+  const results = {};
+
+  try { await getToken(entityId, 'ws_sr_padron_a13'); results.a13_token = 'OK'; } catch(e) { results.a13_token = e.message; }
+  try { await getToken(entityId, 'ws_sr_constancia_inscripcion'); results.ci_token = 'OK'; } catch(e) { results.ci_token = e.message; }
+
+  try {
+    const dummyBody = `<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:a13="http://a13.soap.ws.server.puc.sr/">
+  <soapenv:Header/><soapenv:Body><a13:dummy/></soapenv:Body>
+</soapenv:Envelope>`;
+    const resp = await soapRequest(PADRON_URL, dummyBody, '');
+    results.a13_dummy = resp.includes('<appserver>OK') ? 'OK' : resp.substring(0, 300);
+  } catch(e) { results.a13_dummy = e.message; }
+
+  res.json({ entity: entityId, name: ENTITIES[entityId]?.name, tests: results });
+});
+
 
 // ═══════════ START ═══════════
 app.listen(PORT, () => {
-  console.log(`\n🧾 CarBoys ARCA Server v10`);
+  console.log(`\n🧾 CarBoys ARCA Server v11`);
   console.log(`  Port: ${PORT}`);
-  console.log(`  Env: ${IS_PRODUCTION ? '🔴 PRODUCCION' : '🟡 HOMOLOGACION (testing)'}`);
-  console.log(`  Entity 1: ${ENTITIES['1'].name} (${ENTITIES['1'].cuit}) — Cert: ${ENTITIES['1'].cert ? '✅' : '❌'}`);
-  console.log(`  Entity 2: ${ENTITIES['2'].name} (${ENTITIES['2'].cuit}) — Cert: ${ENTITIES['2'].cert ? '✅' : '❌'}`);
-  console.log(`\n  Endpoints:`);
-  console.log(`    GET  /api/health`);
-  console.log(`    GET  /api/padron?cuit=XXXX&entity=1`);
-  console.log(`    POST /api/auth`);
-  console.log(`    POST /api/ultimo-comprobante`);
-  console.log(`    POST /api/facturar\n`);
+  console.log(`  Env: ${IS_PRODUCTION ? '🔴 PRODUCCION' : '🟡 HOMOLOGACION'}`);
+  console.log(`  Entity 1: ${ENTITIES['1'].name} (${ENTITIES['1'].cuit}) Cert: ${ENTITIES['1'].cert ? '✅' : '❌'}`);
+  console.log(`  Entity 2: ${ENTITIES['2'].name} (${ENTITIES['2'].cuit}) Cert: ${ENTITIES['2'].cert ? '✅' : '❌'}`);
+  console.log(`\n  GET  /api/health`);
+  console.log(`  GET  /api/padron?cuit=XXXX&entity=1`);
+  console.log(`  GET  /api/padron-test?entity=1`);
+  console.log(`  POST /api/auth`);
+  console.log(`  POST /api/ultimo-comprobante`);
+  console.log(`  POST /api/facturar\n`);
 });
