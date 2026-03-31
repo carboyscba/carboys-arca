@@ -203,12 +203,15 @@ async function createInvoice(entityId, invoiceData) {
   const isFCB = tipoComprobante === 6;
   const isFCC = tipoComprobante === 11;
 
-  const impTotConc = isFCB ? importeTotal : 0;
-  const impNeto = isFCA ? importeNeto : (isFCC ? importeTotal : 0);
-  const impIVA = isFCA ? (importeIva || 0) : 0;
+  // FC A (1): IVA discriminado → ImpNeto + ImpIVA = ImpTotal
+  // FC B (6): IVA incluido, alicuota 21% → ImpNeto + ImpIVA = ImpTotal
+  // FC C (11): Monotributo, sin IVA → ImpNeto = total
+  const impTotConc = 0;
+  const impNeto = (isFCA || isFCB) ? importeNeto : (isFCC ? importeTotal : 0);
+  const impIVA = (isFCA || isFCB) ? (importeIva || 0) : 0;
 
   let ivaXml = '';
-  if (isFCA && importeIva > 0) {
+  if ((isFCA || isFCB) && importeIva > 0) {
     ivaXml = `<ar:Iva><ar:AlicIva><ar:Id>5</ar:Id><ar:BaseImp>${impNeto.toFixed(2)}</ar:BaseImp><ar:Importe>${impIVA.toFixed(2)}</ar:Importe></ar:AlicIva></ar:Iva>`;
   }
 
@@ -501,7 +504,7 @@ app.get('/api/padron-test', auth, async (req, res) => {
 
 // ═══════════ START ═══════════
 app.listen(PORT, () => {
-  console.log(`\n🧾 CarBoys ARCA Server v11`);
+  console.log(`\n🧾 CarBoys ARCA Server v12`);
   console.log(`  Port: ${PORT}`);
   console.log(`  Env: ${IS_PRODUCTION ? '🔴 PRODUCCION' : '🟡 HOMOLOGACION'}`);
   console.log(`  Entity 1: ${ENTITIES['1'].name} (${ENTITIES['1'].cuit}) Cert: ${ENTITIES['1'].cert ? '✅' : '❌'}`);
