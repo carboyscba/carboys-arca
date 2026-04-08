@@ -194,7 +194,7 @@ async function getLastInvoiceNum(entityId, puntoVenta, tipoComprobante) {
 
 async function createInvoice(entityId, invoiceData) {
   const authData = await getToken(entityId);
-  const { puntoVenta, tipoComprobante, concepto, docTipo, docNro, importeTotal, importeNeto, importeIva, fchServDesde, fchServHasta, fchVtoPago } = invoiceData;
+  const { puntoVenta, tipoComprobante, concepto, docTipo, docNro, importeTotal, importeNeto, importeIva, fchServDesde, fchServHasta, fchVtoPago, actividad } = invoiceData;
   const lastNum = await getLastInvoiceNum(entityId, puntoVenta, tipoComprobante);
   const nextNum = lastNum + 1;
   const today = new Date().toISOString().split('T')[0].replace(/-/g, '');
@@ -213,6 +213,12 @@ async function createInvoice(entityId, invoiceData) {
   let ivaXml = '';
   if ((isFCA || isFCB) && importeIva > 0) {
     ivaXml = `<ar:Iva><ar:AlicIva><ar:Id>5</ar:Id><ar:BaseImp>${impNeto.toFixed(2)}</ar:BaseImp><ar:Importe>${impIVA.toFixed(2)}</ar:Importe></ar:AlicIva></ar:Iva>`;
+  }
+
+  // Actividades asociadas al comprobante (solo FC A/B de CARBOYS S.A.S.)
+  let actividadesXml = '';
+  if ((isFCA || isFCB) && actividad) {
+    actividadesXml = `<ar:Actividades><ar:Actividad><ar:Id>${actividad}</ar:Id></ar:Actividad></ar:Actividades>`;
   }
 
   // Fechas de servicio obligatorias para concepto 2 (Servicios) y 3 (Productos y Servicios)
@@ -252,6 +258,7 @@ async function createInvoice(entityId, invoiceData) {
             <ar:MonId>PES</ar:MonId>
             <ar:MonCotiz>1</ar:MonCotiz>
             ${ivaXml}
+            ${actividadesXml}
           </ar:FECAEDetRequest>
         </ar:FeDetReq>
       </ar:FeCAEReq>
@@ -259,7 +266,7 @@ async function createInvoice(entityId, invoiceData) {
   </soapenv:Body>
 </soapenv:Envelope>`;
 
-  console.log(`[WSFEv1] Invoice: PV=${puntoVenta} Tipo=${tipoComprobante} Nro=${nextNum} Total=${importeTotal}`);
+  console.log(`[WSFEv1] Invoice: PV=${puntoVenta} Tipo=${tipoComprobante} Nro=${nextNum} Total=${importeTotal}${actividad ? ' Actividad=' + actividad : ''}`);
   const response = await soapRequest(WSFE_URL, soapBody, 'http://ar.gov.afip.dif.FEV1/FECAESolicitar');
 
   const caeMatch = response.match(/<CAE>([\d]+)<\/CAE>/);
@@ -423,7 +430,7 @@ app.post('/api/ultimo-comprobante', auth, async (req, res) => {
 
 app.post('/api/facturar', auth, async (req, res) => {
   try {
-    const { entityId, puntoVenta, tipoFactura, docTipo, docNro, importeTotal, importeNeto, importeIva, concepto, fchServDesde, fchServHasta, fchVtoPago } = req.body;
+    const { entityId, puntoVenta, tipoFactura, docTipo, docNro, importeTotal, importeNeto, importeIva, concepto, actividad, fchServDesde, fchServHasta, fchVtoPago } = req.body;
     const tipoMap = { 'A': 1, 'B': 6, 'C': 11 };
     const result = await createInvoice(entityId || '1', {
       puntoVenta: parseInt(puntoVenta) || 1,
@@ -434,6 +441,7 @@ app.post('/api/facturar', auth, async (req, res) => {
       importeTotal: parseFloat(importeTotal) || 0,
       importeNeto: parseFloat(importeNeto) || 0,
       importeIva: parseFloat(importeIva) || 0,
+      actividad: actividad ? parseInt(actividad) : null,
       fchServDesde: fchServDesde || '',
       fchServHasta: fchServHasta || '',
       fchVtoPago: fchVtoPago || '',
