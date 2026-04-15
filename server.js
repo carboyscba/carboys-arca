@@ -194,7 +194,7 @@ async function getLastInvoiceNum(entityId, puntoVenta, tipoComprobante) {
 
 async function createInvoice(entityId, invoiceData) {
   const authData = await getToken(entityId);
-  const { puntoVenta, tipoComprobante, concepto, docTipo, docNro, importeTotal, importeNeto, importeIva, fchServDesde, fchServHasta, fchVtoPago, actividad } = invoiceData;
+  const { puntoVenta, tipoComprobante, concepto, docTipo, docNro, importeTotal, importeNeto, importeIva, fchServDesde, fchServHasta, fchVtoPago, actividad, condicionIVAReceptor } = invoiceData;
   const lastNum = await getLastInvoiceNum(entityId, puntoVenta, tipoComprobante);
   const nextNum = lastNum + 1;
   const today = new Date().toISOString().split('T')[0].replace(/-/g, '');
@@ -257,6 +257,7 @@ async function createInvoice(entityId, invoiceData) {
             <ar:ImpIVA>${impIVA.toFixed(2)}</ar:ImpIVA>
             <ar:MonId>PES</ar:MonId>
             <ar:MonCotiz>1</ar:MonCotiz>
+            ${condicionIVAReceptor ? `<ar:CondicionIVAReceptorId>${condicionIVAReceptor}</ar:CondicionIVAReceptorId>` : ''}
             ${ivaXml}
             ${actividadesXml}
           </ar:FECAEDetRequest>
@@ -430,7 +431,7 @@ app.post('/api/ultimo-comprobante', auth, async (req, res) => {
 
 app.post('/api/facturar', auth, async (req, res) => {
   try {
-    const { entityId, puntoVenta, tipoFactura, docTipo, docNro, importeTotal, importeNeto, importeIva, concepto, actividad, fchServDesde, fchServHasta, fchVtoPago } = req.body;
+    const { entityId, puntoVenta, tipoFactura, docTipo, docNro, importeTotal, importeNeto, importeIva, concepto, actividad, condicionIVAReceptor, fchServDesde, fchServHasta, fchVtoPago } = req.body;
     const tipoMap = { 'A': 1, 'B': 6, 'C': 11 };
     const result = await createInvoice(entityId || '1', {
       puntoVenta: parseInt(puntoVenta) || 1,
@@ -442,6 +443,7 @@ app.post('/api/facturar', auth, async (req, res) => {
       importeNeto: parseFloat(importeNeto) || 0,
       importeIva: parseFloat(importeIva) || 0,
       actividad: actividad ? parseInt(actividad) : null,
+      condicionIVAReceptor: condicionIVAReceptor ? parseInt(condicionIVAReceptor) : null,
       fchServDesde: fchServDesde || '',
       fchServHasta: fchServHasta || '',
       fchVtoPago: fchVtoPago || '',
