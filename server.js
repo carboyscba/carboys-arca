@@ -9,13 +9,33 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
-app.use(cors());
+
+// ── CORS ──
+// Por defecto acepta cualquier origen (comportamiento historico, no rompe nada).
+// Para restringirlo, definir ARCA_ALLOWED_ORIGINS con los dominios separados
+// por coma. Ej: "https://carboysapp.vercel.app,https://www.carboys.com.ar"
+const ALLOWED_ORIGINS = (process.env.ARCA_ALLOWED_ORIGINS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors(ALLOWED_ORIGINS.length ? { origin: ALLOWED_ORIGINS } : {}));
+
 app.use(express.json({ limit: '5mb' }));
 
 // ── Config ──
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.ARCA_API_KEY || 'carboys-arca-2026';
 const IS_PRODUCTION = process.env.ARCA_ENV === 'production';
+
+// Proyectos de Firebase cuyos usuarios pueden facturar. Cada sucursal tiene su
+// propia nube, asi que si se agrega una hay que sumarla aca (separadas por coma
+// en FIREBASE_PROJECTS). Mientras tanto esos usuarios siguen entrando por
+// x-api-key, asi que no se corta la facturacion.
+const FIREBASE_PROJECTS = (process.env.FIREBASE_PROJECTS || 'carboys-6625b')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
+// Lista opcional de emails habilitados a facturar. Vacia = cualquier usuario
+// autenticado de un proyecto permitido.
+const ALLOWED_EMAILS = (process.env.ARCA_ALLOWED_EMAILS || '')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 
 const WSAA_URL = IS_PRODUCTION
   ? 'https://wsaa.afip.gov.ar/ws/services/LoginCms'
@@ -49,11 +69,136 @@ const ENTITIES = {
 
 const tokenCache = {};
 
-const auth = (req, res, next) => {
+// ══════════════════════════════════════════════════════════════════
+// AUTENTICACION
+// ══════════════════════════════════════════════════════════════════
+// Dos formas de autenticarse, en este orden:
+//
+//   1. ID token de Firebase (Authorization: Bearer <token>) — la buena.
+//      Lo emite Google al usuario que se loguea en la app, dura 1 hora y
+//      no se puede falsificar. Identifica a la persona concreta.
+//
+//   2. x-api-key — la vieja. Es una clave compartida que viaja dentro del
+//      bundle del navegador, o sea que es publica. Se mantiene solo para
+//      no cortar la facturacion durante la migracion; una vez que la app
+//      mande el token en todos lados, hay que borrar este camino.
+//
+// Un request entra si cumple CUALQUIERA de las dos.
+
+// Configurable solo para poder correr tests contra un emisor falso; en
+// produccion se deja el default (las claves publicas reales de Google).
+const GOOGLE_CERTS_URL = process.env.GOOGLE_CERTS_URL ||
+  'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com';
+
+let _certsCache = { keys: null, expiry: 0 };
+
+// Google rota estas claves publicas cada tanto, por eso se respeta el max-age
+// del Cache-Control en vez de cachearlas para siempre.
+function fetchGoogleCerts() {
+  return new Promise((resolve, reject) => {
+    const mod = GOOGLE_CERTS_URL.startsWith('http://') ? http : https;
+    const req = mod.get(GOOGLE_CERTS_URL, (res) => {
+      let data = '';
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => {
+        if (res.statusCode !== 200) return reject(new Error(`certs HTTP ${res.statusCode}`));
+        try {
+          const keys = JSON.parse(data);
+          const maxAge = /max-age=(\d+)/.exec(res.headers['cache-control'] || '');
+          resolve({ keys, ttl: (maxAge ? parseInt(maxAge[1], 10) : 3600) * 1000 });
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(10000, () => req.destroy(new Error('timeout pidiendo certs a Google')));
+  });
+}
+
+async function getGoogleCerts() {
+  if (_certsCache.keys && _certsCache.expiry > Date.now()) return _certsCache.keys;
+  const { keys, ttl } = await fetchGoogleCerts();
+  _certsCache = { keys, expiry: Date.now() + ttl };
+  return keys;
+}
+
+const b64url = (s) => Buffer.from(String(s).replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+
+async function verifyFirebaseToken(token) {
+  const parts = String(token).split('.');
+  if (parts.length !== 3) throw new Error('token mal formado');
+
+  const header = JSON.parse(b64url(parts[0]).toString('utf8'));
+  const payload = JSON.parse(b64url(parts[1]).toString('utf8'));
+
+  if (header.alg !== 'RS256') throw new Error(`alg no soportado: ${header.alg}`);
+  if (!header.kid) throw new Error('header sin kid');
+
+  const certs = await getGoogleCerts();
+  const certPem = certs[header.kid];
+  if (!certPem) throw new Error('kid desconocido');
+
+  const publicKey = new crypto.X509Certificate(certPem).publicKey;
+  const firmaOk = crypto.createVerify('RSA-SHA256')
+    .update(`${parts[0]}.${parts[1]}`)
+    .verify(publicKey, b64url(parts[2]));
+  if (!firmaOk) throw new Error('firma invalida');
+
+  const now = Math.floor(Date.now() / 1000);
+  if (!payload.exp || payload.exp <= now) throw new Error('token vencido');
+  if (payload.iat && payload.iat > now + 300) throw new Error('iat en el futuro');
+  if (!payload.sub) throw new Error('token sin sub');
+
+  // aud e iss atan el token a UNO de nuestros proyectos de Firebase. Sin esto
+  // cualquiera podria crear su propio proyecto, firmar un token con el email
+  // que quiera y entrar.
+  if (!FIREBASE_PROJECTS.includes(payload.aud)) {
+    throw new Error(`proyecto no autorizado: ${payload.aud}`);
+  }
+  if (payload.iss !== `https://securetoken.google.com/${payload.aud}`) {
+    throw new Error(`emisor invalido: ${payload.iss}`);
+  }
+
+  const email = String(payload.email || '').toLowerCase();
+  if (ALLOWED_EMAILS.length && !ALLOWED_EMAILS.includes(email)) {
+    throw new Error(`email no habilitado para facturar: ${email || '(sin email)'}`);
+  }
+
+  return payload;
+}
+
+const auth = async (req, res, next) => {
+  const bearer = /^Bearer (.+)$/.exec(req.headers.authorization || '');
+
+  if (bearer) {
+    try {
+      const payload = await verifyFirebaseToken(bearer[1]);
+      req.authUser = {
+        via: 'firebase',
+        email: payload.email || null,
+        uid: payload.sub,
+        proyecto: payload.aud,
+      };
+      return next();
+    } catch (e) {
+      // No se corta aca: se cae al chequeo de x-api-key para no romper a
+      // quienes todavia no mandan token.
+      console.warn(`[AUTH] token de Firebase rechazado: ${e.message}`);
+    }
+  }
+
   const key = req.headers['x-api-key'];
-  if (key !== API_KEY) return res.status(401).json({ error: 'Unauthorized' });
-  next();
+  if (key && key === API_KEY) {
+    req.authUser = { via: 'api-key', email: null, uid: null, proyecto: null };
+    return next();
+  }
+
+  return res.status(401).json({ error: 'Unauthorized' });
 };
+
+// Deja rastro de quien emitio cada comprobante.
+const quien = (req) => req.authUser?.via === 'firebase'
+  ? `${req.authUser.email || req.authUser.uid}`
+  : 'api-key (sin identificar)';
 
 function soapRequest(url, body, soapAction) {
   return new Promise((resolve, reject) => {
@@ -417,8 +562,17 @@ function extractPadronData(response, cleanCuit, source) {
 
 app.get('/api/health', (req, res) => {
   res.json({
-    status: 'ok', version: 'v13-nota-credito',
+    status: 'ok', version: 'v14-auth-firebase',
     env: IS_PRODUCTION ? 'production' : 'homologacion',
+    // Diagnostico de seguridad — para ver de un vistazo que falta cerrar
+    auth: {
+      firebase: true,
+      proyectos: FIREBASE_PROJECTS,
+      emailsHabilitados: ALLOWED_EMAILS.length || 'todos',
+      apiKeyAceptada: true,          // pasa a false cuando cerremos la Etapa 2
+      apiKeyPorDefecto: !process.env.ARCA_API_KEY,
+      corsRestringido: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : false,
+    },
     wsaaUrl: WSAA_URL, wsfeUrl: WSFE_URL, padronUrl: PADRON_URL,
     entities: {
       '1': { name: ENTITIES['1'].name, cuit: ENTITIES['1'].cuit, hasCert: !!ENTITIES['1'].cert },
@@ -462,7 +616,9 @@ app.post('/api/facturar', auth, async (req, res) => {
       fchServHasta: fchServHasta || '',
       fchVtoPago: fchVtoPago || '',
     });
-    console.log(result.success ? `[FC] ✅ CAE: ${result.cae} Nro: ${result.cbteNro}` : `[FC] ❌ ${result.error}`);
+    console.log(result.success
+      ? `[FC] ✅ CAE: ${result.cae} Nro: ${result.cbteNro} — por ${quien(req)}`
+      : `[FC] ❌ ${result.error} — por ${quien(req)}`);
     res.json(result);
   } catch (e) { console.error('[FACTURAR]', e.message); res.status(500).json({ success: false, error: e.message }); }
 });
@@ -525,8 +681,8 @@ app.post('/api/nota-credito', auth, async (req, res) => {
     });
 
     console.log(result.success
-      ? `[NC] ✅ CAE: ${result.cae} Nro: ${result.cbteNro} (anula FC ${facturaOriginal.tipo} ${facturaOriginal.ptoVta}-${facturaOriginal.nro})`
-      : `[NC] ❌ ${result.error}`);
+      ? `[NC] ✅ CAE: ${result.cae} Nro: ${result.cbteNro} (anula FC ${facturaOriginal.tipo} ${facturaOriginal.ptoVta}-${facturaOriginal.nro}) — por ${quien(req)}`
+      : `[NC] ❌ ${result.error} — por ${quien(req)}`);
     res.json(result);
   } catch (e) {
     console.error('[NOTA-CREDITO]', e.message);
@@ -595,9 +751,13 @@ app.get('/api/padron-test', auth, async (req, res) => {
 
 // ═══════════ START ═══════════
 app.listen(PORT, () => {
-  console.log(`\n🧾 CarBoys ARCA Server v13-nota-credito`);
+  console.log(`\n🧾 CarBoys ARCA Server v14-auth-firebase`);
   console.log(`  Port: ${PORT}`);
   console.log(`  Env: ${IS_PRODUCTION ? '🔴 PRODUCCION' : '🟡 HOMOLOGACION'}`);
+  console.log(`  Auth: 🔑 Firebase (proyectos: ${FIREBASE_PROJECTS.join(', ')})`);
+  console.log(`        ${ALLOWED_EMAILS.length ? `emails habilitados: ${ALLOWED_EMAILS.length}` : 'emails: todos los del proyecto'}`);
+  console.log(`        ⚠️  x-api-key TODAVIA ACEPTADA (migracion) ${process.env.ARCA_API_KEY ? '' : '— y usando la clave POR DEFECTO'}`);
+  console.log(`  CORS: ${ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS.join(', ') : '⚠️  abierto a cualquier origen'}`);
   console.log(`  Entity 1: ${ENTITIES['1'].name} (${ENTITIES['1'].cuit}) Cert: ${ENTITIES['1'].cert ? '✅' : '❌'}`);
   console.log(`  Entity 2: ${ENTITIES['2'].name} (${ENTITIES['2'].cuit}) Cert: ${ENTITIES['2'].cert ? '✅' : '❌'}`);
   console.log(`\n  GET  /api/health`);
