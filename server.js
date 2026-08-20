@@ -194,7 +194,7 @@ async function getLastInvoiceNum(entityId, puntoVenta, tipoComprobante) {
 
 async function createInvoice(entityId, invoiceData) {
   const authData = await getToken(entityId);
-  const { puntoVenta, tipoComprobante, concepto, docTipo, docNro, importeTotal, importeNeto, importeIva, fchServDesde, fchServHasta, fchVtoPago, actividad, condicionIVAReceptor } = invoiceData;
+  const { puntoVenta, tipoComprobante, concepto, docTipo, docNro, importeTotal, importeNeto, importeIva, fchServDesde, fchServHasta, fchVtoPago, actividad, condicionIVAReceptor, cbtesAsoc } = invoiceData;
   const lastNum = await getLastInvoiceNum(entityId, puntoVenta, tipoComprobante);
   const nextNum = lastNum + 1;
   const today = new Date().toISOString().split('T')[0].replace(/-/g, '');
@@ -202,23 +202,35 @@ async function createInvoice(entityId, invoiceData) {
   const isFCA = tipoComprobante === 1;
   const isFCB = tipoComprobante === 6;
   const isFCC = tipoComprobante === 11;
+  const isNCA = tipoComprobante === 3;
+  const isNCB = tipoComprobante === 8;
+  const isNCC = tipoComprobante === 13;
 
-  // FC A (1): IVA discriminado → ImpNeto + ImpIVA = ImpTotal
-  // FC B (6): IVA incluido, alicuota 21% → ImpNeto + ImpIVA = ImpTotal
-  // FC C (11): Monotributo, sin IVA → ImpNeto = total
+  // Para FC y NC con discriminación de IVA: A/B/3/8 → ImpNeto + ImpIVA = ImpTotal
+  // Para FC C / NC C (11/13): sin IVA → ImpNeto = total
+  const usesIva = isFCA || isFCB || isNCA || isNCB;
+  const isMonotributo = isFCC || isNCC;
   const impTotConc = 0;
-  const impNeto = (isFCA || isFCB) ? importeNeto : (isFCC ? importeTotal : 0);
-  const impIVA = (isFCA || isFCB) ? (importeIva || 0) : 0;
+  const impNeto = usesIva ? importeNeto : (isMonotributo ? importeTotal : 0);
+  const impIVA = usesIva ? (importeIva || 0) : 0;
 
   let ivaXml = '';
-  if ((isFCA || isFCB) && importeIva > 0) {
+  if (usesIva && importeIva > 0) {
     ivaXml = `<ar:Iva><ar:AlicIva><ar:Id>5</ar:Id><ar:BaseImp>${impNeto.toFixed(2)}</ar:BaseImp><ar:Importe>${impIVA.toFixed(2)}</ar:Importe></ar:AlicIva></ar:Iva>`;
   }
 
-  // Actividades asociadas al comprobante (solo FC A/B de CARBOYS S.A.S.)
+  // Actividades asociadas al comprobante (solo FC/NC A/B de CARBOYS S.A.S.)
   let actividadesXml = '';
-  if ((isFCA || isFCB) && actividad) {
+  if (usesIva && actividad) {
     actividadesXml = `<ar:Actividades><ar:Actividad><ar:Id>${actividad}</ar:Id></ar:Actividad></ar:Actividades>`;
+  }
+
+  // Comprobantes asociados (OBLIGATORIO para Notas de Crédito - referencia a la factura original)
+  let cbtesAsocXml = '';
+  if (cbtesAsoc && cbtesAsoc.tipo && cbtesAsoc.ptoVta && cbtesAsoc.nro) {
+    const cuitAsoc = cbtesAsoc.cuit ? `<ar:Cuit>${String(cbtesAsoc.cuit).replace(/[^0-9]/g, '')}</ar:Cuit>` : '';
+    const fchAsoc = cbtesAsoc.fch ? `<ar:CbteFch>${String(cbtesAsoc.fch).replace(/-/g, '')}</ar:CbteFch>` : '';
+    cbtesAsocXml = `<ar:CbtesAsoc><ar:CbteAsoc><ar:Tipo>${cbtesAsoc.tipo}</ar:Tipo><ar:PtoVta>${cbtesAsoc.ptoVta}</ar:PtoVta><ar:Nro>${cbtesAsoc.nro}</ar:Nro>${cuitAsoc}${fchAsoc}</ar:CbteAsoc></ar:CbtesAsoc>`;
   }
 
   // Fechas de servicio obligatorias para concepto 2 (Servicios) y 3 (Productos y Servicios)
@@ -260,6 +272,7 @@ async function createInvoice(entityId, invoiceData) {
             ${condicionIVAReceptor ? `<ar:CondicionIVAReceptorId>${condicionIVAReceptor}</ar:CondicionIVAReceptorId>` : ''}
             ${ivaXml}
             ${actividadesXml}
+            ${cbtesAsocXml}
           </ar:FECAEDetRequest>
         </ar:FeDetReq>
       </ar:FeCAEReq>
@@ -267,7 +280,8 @@ async function createInvoice(entityId, invoiceData) {
   </soapenv:Body>
 </soapenv:Envelope>`;
 
-  console.log(`[WSFEv1] Invoice: PV=${puntoVenta} Tipo=${tipoComprobante} Nro=${nextNum} Total=${importeTotal}${actividad ? ' Actividad=' + actividad : ''}`);
+  const isNC = tipoComprobante === 3 || tipoComprobante === 8 || tipoComprobante === 13;
+  console.log(`[WSFEv1] ${isNC ? 'NotaCredito' : 'Invoice'}: PV=${puntoVenta} Tipo=${tipoComprobante} Nro=${nextNum} Total=${importeTotal}${actividad ? ' Actividad=' + actividad : ''}${cbtesAsocXml ? ' AsocPV=' + cbtesAsoc.ptoVta + ' AsocNro=' + cbtesAsoc.nro : ''}`);
   const response = await soapRequest(WSFE_URL, soapBody, 'http://ar.gov.afip.dif.FEV1/FECAESolicitar');
 
   const caeMatch = response.match(/<CAE>([\d]+)<\/CAE>/);
@@ -403,7 +417,7 @@ function extractPadronData(response, cleanCuit, source) {
 
 app.get('/api/health', (req, res) => {
   res.json({
-    status: 'ok', version: 'v11',
+    status: 'ok', version: 'v13-nota-credito',
     env: IS_PRODUCTION ? 'production' : 'homologacion',
     wsaaUrl: WSAA_URL, wsfeUrl: WSFE_URL, padronUrl: PADRON_URL,
     entities: {
@@ -451,6 +465,73 @@ app.post('/api/facturar', auth, async (req, res) => {
     console.log(result.success ? `[FC] ✅ CAE: ${result.cae} Nro: ${result.cbteNro}` : `[FC] ❌ ${result.error}`);
     res.json(result);
   } catch (e) { console.error('[FACTURAR]', e.message); res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ══════════════════════════════════════════
+// NOTAS DE CREDITO — Anular factura emitida
+// ══════════════════════════════════════════
+// Recibe los datos de la factura original + monto y emite NC del mismo tipo (A→3, B→8, C→13)
+// Inyecta CbtesAsoc obligatorio para que ARCA acepte la NC
+app.post('/api/nota-credito', auth, async (req, res) => {
+  try {
+    const {
+      entityId,
+      puntoVenta,
+      tipoFactura,        // 'A'/'B'/'C' — la letra de la FC ORIGINAL (la NC será del mismo tipo)
+      docTipo, docNro,
+      importeTotal, importeNeto, importeIva,
+      concepto, actividad, condicionIVAReceptor,
+      fchServDesde, fchServHasta, fchVtoPago,
+      // Datos de la factura asociada (OBLIGATORIO):
+      facturaOriginal,    // { tipo: 'A'|'B'|'C', ptoVta, nro, fecha (yyyy-mm-dd) }
+    } = req.body;
+
+    // Validar datos obligatorios de la FC original
+    if (!facturaOriginal || !facturaOriginal.tipo || !facturaOriginal.ptoVta || !facturaOriginal.nro) {
+      return res.status(400).json({ success: false, error: 'Faltan datos de la factura original (tipo, ptoVta, nro)' });
+    }
+
+    // Mapeo de NC: misma letra que la FC original
+    const tipoMapNC = { 'A': 3, 'B': 8, 'C': 13 };
+    const tipoMapFC = { 'A': 1, 'B': 6, 'C': 11 };
+    const tipoComprobanteNC = tipoMapNC[tipoFactura] || 8;
+    const tipoComprobanteFCOriginal = tipoMapFC[facturaOriginal.tipo] || 6;
+
+    // CUIT del emisor (necesario para CbtesAsoc)
+    const entity = ENTITIES[entityId || '1'];
+    if (!entity) return res.status(400).json({ success: false, error: 'Entity invalida' });
+
+    const result = await createInvoice(entityId || '1', {
+      puntoVenta: parseInt(puntoVenta) || 1,
+      tipoComprobante: tipoComprobanteNC,
+      concepto: concepto || 1,
+      docTipo: parseInt(docTipo) || 99,
+      docNro: parseInt(docNro) || 0,
+      importeTotal: parseFloat(importeTotal) || 0,
+      importeNeto: parseFloat(importeNeto) || 0,
+      importeIva: parseFloat(importeIva) || 0,
+      actividad: actividad ? parseInt(actividad) : null,
+      condicionIVAReceptor: condicionIVAReceptor ? parseInt(condicionIVAReceptor) : null,
+      fchServDesde: fchServDesde || '',
+      fchServHasta: fchServHasta || '',
+      fchVtoPago: fchVtoPago || '',
+      cbtesAsoc: {
+        tipo: tipoComprobanteFCOriginal,
+        ptoVta: parseInt(facturaOriginal.ptoVta) || 1,
+        nro: parseInt(facturaOriginal.nro) || 0,
+        cuit: entity.cuit,
+        fch: facturaOriginal.fecha || '',
+      },
+    });
+
+    console.log(result.success
+      ? `[NC] ✅ CAE: ${result.cae} Nro: ${result.cbteNro} (anula FC ${facturaOriginal.tipo} ${facturaOriginal.ptoVta}-${facturaOriginal.nro})`
+      : `[NC] ❌ ${result.error}`);
+    res.json(result);
+  } catch (e) {
+    console.error('[NOTA-CREDITO]', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // ══════════════════════════════════════════
@@ -514,7 +595,7 @@ app.get('/api/padron-test', auth, async (req, res) => {
 
 // ═══════════ START ═══════════
 app.listen(PORT, () => {
-  console.log(`\n🧾 CarBoys ARCA Server v12`);
+  console.log(`\n🧾 CarBoys ARCA Server v13-nota-credito`);
   console.log(`  Port: ${PORT}`);
   console.log(`  Env: ${IS_PRODUCTION ? '🔴 PRODUCCION' : '🟡 HOMOLOGACION'}`);
   console.log(`  Entity 1: ${ENTITIES['1'].name} (${ENTITIES['1'].cuit}) Cert: ${ENTITIES['1'].cert ? '✅' : '❌'}`);
@@ -524,5 +605,6 @@ app.listen(PORT, () => {
   console.log(`  GET  /api/padron-test?entity=1`);
   console.log(`  POST /api/auth`);
   console.log(`  POST /api/ultimo-comprobante`);
-  console.log(`  POST /api/facturar\n`);
+  console.log(`  POST /api/facturar`);
+  console.log(`  POST /api/nota-credito\n`);
 });
