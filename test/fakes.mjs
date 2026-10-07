@@ -47,7 +47,7 @@ export async function startFakes() {
       requests: [],                               // {action, body}
       caeSeq: 70000000000000,
     },
-    padronMode: 'a13',                            // a13 | a13fail-ci | fail
+    padronMode: 'ok',                             // ok | cifail-a13 (constancia falla, A13 responde) | a13fail-ci | fail
   };
 
   // ── Google certs ──
@@ -149,11 +149,17 @@ export async function startFakes() {
   });
 
   // ── Padrón ──
+  // Realista: A13 devuelve solo nombre y domicilio (sin impuestos); la
+  // constancia (A5) trae además <datosRegimenGeneral> con el IVA 30.
   const padron = http.createServer(async (req, res) => {
     await readBody(req);
-    if (state.padronMode === 'fail' || (state.padronMode === 'a13fail-ci' && req.url.includes('A13'))) { res.writeHead(500); return res.end('<faultstring>No existe persona con ese Id</faultstring>'); }
+    const esA13 = req.url.includes('A13');
+    const falla = state.padronMode === 'fail' || (state.padronMode === 'cifail-a13' && !esA13) || (state.padronMode === 'a13fail-ci' && esA13);
+    if (falla) { res.writeHead(500); return res.end('<faultstring>No existe persona con ese Id</faultstring>'); }
     res.writeHead(200, { 'Content-Type': 'text/xml' });
-    res.end(`<soap:Envelope><soap:Body><ns2:getPersonaResponse><personaReturn><persona><tipoPersona>JURIDICA</tipoPersona><razonSocial>EMPRESA DE PRUEBA S.A.</razonSocial><domicilio><direccion>AV SIEMPRE VIVA 123</direccion><localidad>CORDOBA</localidad><descripcionProvincia>CORDOBA</descripcionProvincia><codPostal>5000</codPostal></domicilio><impuesto><idImpuesto>30</idImpuesto></impuesto></persona></personaReturn></ns2:getPersonaResponse></soap:Body></soap:Envelope>`);
+    const dom = '<direccion>AV SIEMPRE VIVA 123</direccion><localidad>CORDOBA</localidad><descripcionProvincia>CORDOBA</descripcionProvincia><codPostal>5000</codPostal>';
+    if (esA13) return res.end(`<soap:Envelope><soap:Body><ns2:getPersonaResponse><personaReturn><persona><tipoPersona>JURIDICA</tipoPersona><razonSocial>EMPRESA DE PRUEBA S.A.</razonSocial><domicilio>${dom}</domicilio></persona></personaReturn></ns2:getPersonaResponse></soap:Body></soap:Envelope>`);
+    res.end(`<soap:Envelope><soap:Body><ns2:getPersona_v2Response><personaReturn><datosGenerales><tipoPersona>JURIDICA</tipoPersona><razonSocial>EMPRESA DE PRUEBA S.A.</razonSocial><domicilioFiscal>${dom}</domicilioFiscal></datosGenerales><datosRegimenGeneral><impuesto><idImpuesto>30</idImpuesto><descripcionImpuesto>IVA</descripcionImpuesto></impuesto></datosRegimenGeneral></personaReturn></ns2:getPersona_v2Response></soap:Body></soap:Envelope>`);
   });
 
   const ports = {

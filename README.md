@@ -41,7 +41,7 @@ Para pasar un PEM a base64: `base64 -w0 archivo.pem`.
 |---|---|---|
 | `GET /api/health` | no | Estado mínimo: `status`, `version`, `env`, `configuracionCompleta`. La app muestra un aviso si `env` no es `production`. |
 | `GET /api/health/detalle` | token | Diagnóstico completo (entidades, auth, CORS, TLS). |
-| `GET /api/padron?cuit=&entity=` | token | Datos del contribuyente (A13, y si falla, Constancia de Inscripción). Devuelve `condIva` y `condIvaId`. Límite 30/min. |
+| `GET /api/padron?cuit=&entity=` | token | Datos del contribuyente: primero Constancia de Inscripción (trae los impuestos → condición IVA) y, si falla, Padrón A13 (solo nombre y domicilio). Devuelve `condIva`, `condIvaId` y `condIvaDeterminada` (false = no se pudo saber; la app respeta la letra elegida). Límite 30/min. |
 | `POST /api/facturar` | token + permiso | Emite FC A/B/C. Cuerpo: `entityId, puntoVenta, tipoFactura, docTipo, docNro, importeTotal, importeNeto, importeIva, concepto, fchServDesde, fchServHasta, fchVtoPago, condicionIVAReceptor, actividad`. Todo se valida (400 con el motivo). |
 | `POST /api/nota-credito` | token + permiso | Ídem más `facturaOriginal: { tipo, ptoVta, nro, fecha }`. Misma letra que la FC. |
 | `POST /api/recuperar` | token + permiso | Si se cortó la conexión después de pedir el CAE: busca el último comprobante autorizado y, si coincide con lo que se intentó emitir (documento, importe, fecha de hoy) y fue autorizado hace menos de 20 minutos, devuelve su CAE. |

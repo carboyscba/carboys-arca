@@ -41,7 +41,7 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = 'v15-auditoria-b1';
+const VERSION = 'v16-padron-constancia';
 const app = express();
 
 // ── CORS ──
@@ -828,6 +828,18 @@ async function createInvoice(d, ctx) {
 // ══════════════════════════════════════════════════════════════════
 // PADRÓN
 // ══════════════════════════════════════════════════════════════════
+// ── Datos del padrón → lo que necesita la app ──
+// Dos servicios distintos, con alcances distintos:
+//  · Constancia de Inscripción (A5): nombre, domicilio Y los impuestos en los
+//    que está inscripto (IVA 30 = Responsable Inscripto, 32 = Exento,
+//    Monotributo 20). Es el único que sirve para saber la condición de IVA.
+//  · Padrón alcance 13 (A13): solo nombre y domicilio. NO trae impuestos.
+// Hasta la v15 se consultaba primero A13 y, como nunca trae impuestos, todo
+// CUIT salía "Consumidor Final" (el 2026-10-07 una empresa de renting quedó
+// como consumidor final y la app propuso Factura B). Ahora: la condición se
+// deduce solo si la respuesta trae impuestos; si no, se devuelve
+// condIvaId 0 ("No determinada") y la app respeta la letra elegida.
+const CONSTANCIA = 'ws_sr_constancia_inscripcion';
 function extractPadronData(response, cleanCuit, source) {
   const g = (tag) => { const m = response.match(new RegExp(`<${tag}>([^<]*)</${tag}>`)); return m ? m[1] : ''; };
   const razonSocial = g('razonSocial'), apellido = g('apellido'), nombre = g('nombre'), tipoPersona = g('tipoPersona');
@@ -837,13 +849,19 @@ function extractPadronData(response, cleanCuit, source) {
   const domParts = [g('direccion'), g('localidad'), g('descripcionProvincia'), g('codPostal') ? `CP ${g('codPostal')}` : ''].filter(Boolean);
   const hasImp30 = response.includes('<idImpuesto>30</idImpuesto>');
   const hasImp32 = response.includes('<idImpuesto>32</idImpuesto>');
-  const hasImp20 = response.includes('<idImpuesto>20</idImpuesto>');
-  const condIva = hasImp32 ? 'IVA Exento' : hasImp30 ? 'Responsable Inscripto' : hasImp20 ? 'Monotributo' : 'Consumidor Final';
-  // Id de condición IVA del receptor que corresponde (para CondicionIVAReceptorId)
-  const condIvaId = hasImp32 ? 4 : hasImp30 ? 1 : hasImp20 ? 6 : 5;
+  const hasImp20 = response.includes('<idImpuesto>20</idImpuesto>') || response.includes('<datosMonotributo>') || response.includes('<categoriaMonotributo>');
+  // ¿La respuesta es de las que informan impuestos? La constancia siempre; A13
+  // nunca (salvo que algún día los traiga: si aparece la etiqueta, se usa).
+  const informaImpuestos = source === CONSTANCIA || /<idImpuesto>|<datosRegimenGeneral>|<datosMonotributo>/.test(response);
+  let condIva, condIvaId;
+  if (hasImp30) { condIva = 'Responsable Inscripto'; condIvaId = 1; }
+  else if (hasImp20) { condIva = 'Monotributo'; condIvaId = 6; }
+  else if (hasImp32) { condIva = 'IVA Exento'; condIvaId = 4; }
+  else if (informaImpuestos && !isJuridica) { condIva = 'Consumidor Final'; condIvaId = 5; }   // persona física sin IVA ni monotributo
+  else { condIva = 'No determinada'; condIvaId = 0; }   // sin datos de impuestos, o empresa sin IVA (nunca "consumidor final")
   return {
     success: true, source, cuit: cleanCuit, tipoPersona, nombre: fullName, razonSocial, apellido, nombrePila: nombre,
-    domicilioFiscal: domParts.join(', '), condIva, condIvaId,
+    domicilioFiscal: domParts.join(', '), condIva, condIvaId, condIvaDeterminada: condIvaId !== 0,
   };
 }
 
@@ -863,7 +881,7 @@ async function consultarPadronA13(entityId, cleanCuit, ctx) {
 }
 
 async function consultarConstancia(entityId, cleanCuit, ctx) {
-  const a = await getToken(entityId, 'ws_sr_constancia_inscripcion', ctx);
+  const a = await getToken(entityId, CONSTANCIA, ctx);
   const soapBody = `<?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:a5="http://a5.soap.ws.server.puc.sr/">
   <soapenv:Header/>
@@ -874,7 +892,7 @@ async function consultarConstancia(entityId, cleanCuit, ctx) {
   </soapenv:Body>
 </soapenv:Envelope>`;
   const response = await soapRequest(CONSTANCIA_URL, soapBody, '');
-  return extractPadronData(response, cleanCuit, 'ws_sr_constancia_inscripcion');
+  return extractPadronData(response, cleanCuit, CONSTANCIA);
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -985,7 +1003,8 @@ app.get('/api/padron', auth, rateLimit('padron', 30, 60000), async (req, res) =>
     const entityId = String(req.query.entity || '1');
     if (cleanCuit.length < 7 || cleanCuit.length > 11) return res.status(400).json({ success: false, error: 'CUIT inválido' });
     if (!entidadDisponible(entityId)) return res.status(503).json({ success: false, error: `La entidad ${entityId} no tiene certificado configurado` });
-    const intentos = [['a13', consultarPadronA13], ['ci', consultarConstancia]];
+    // Primero la constancia (trae impuestos → condición IVA); A13 solo de respaldo para nombre y domicilio.
+    const intentos = [['constancia', consultarConstancia], ['a13', consultarPadronA13]];
     for (const [nombre, fn] of intentos) {
       try {
         const r = await fn(entityId, cleanCuit, req.fsCtx);

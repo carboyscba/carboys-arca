@@ -1,7 +1,7 @@
 // Pruebas de integración en frío de server.js. Requiere: node >= 20 y openssl en el PATH.
 // Levanta servidores simulados (Google, Firestore, WSAA, WSFEv1, Padrón) y arranca server.js
 // contra ellos. No toca AFIP ni la nube real. Correr con: npm test
-// Pruebas de integración en frío de server.js (carboys-arca v15)
+// Pruebas de integración en frío de server.js (carboys-arca v16)
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import path from 'node:path';
@@ -92,7 +92,7 @@ async function main() {
   ok(!S.timeout, 'el servidor arranca con configuración completa');
   let r = await call('/api/health', { method: 'GET', token: null, user: null });
   eq(r.status, 200, 'GET /api/health responde 200 sin autenticación');
-  ok(r.json && r.json.status === 'ok' && r.json.env === 'homologacion' && r.json.configuracionCompleta === true && /^v15/.test(r.json.version), 'health mínimo: status ok, env homologacion, versión v15', r.json);
+  ok(r.json && r.json.status === 'ok' && r.json.env === 'homologacion' && r.json.configuracionCompleta === true && /^v16/.test(r.json.version), 'health mínimo: status ok, env homologacion, versión v16', r.json);
   ok(r.json && !('entities' in r.json) && !('auth' in r.json), 'health público no expone entidades ni configuración de auth', r.json);
   r = await call('/api/health/detalle', { method: 'GET', token: null, user: null });
   eq(r.status, 401, 'GET /api/health/detalle sin token → 401');
@@ -331,15 +331,22 @@ async function main() {
 
   console.log('\n═══ 14. Padrón ═══');
   UID = 'uid-seccion-14';
+  const wsaaAntesPadron = state.wsaaCalls;
   r = await call('/api/padron?cuit=30-71745468-1&entity=1', { method: 'GET' });
-  ok(r.status === 200 && r.json.success && r.json.condIva === 'Responsable Inscripto' && r.json.condIvaId === 1 && r.json.nombre === 'EMPRESA DE PRUEBA S.A.' && /CORDOBA/.test(r.json.domicilioFiscal), 'padrón devuelve nombre, domicilio, condición IVA e id', r.json);
+  ok(r.status === 200 && r.json.success && r.json.condIva === 'Responsable Inscripto' && r.json.condIvaId === 1 && r.json.condIvaDeterminada === true && r.json.nombre === 'EMPRESA DE PRUEBA S.A.' && /CORDOBA/.test(r.json.domicilioFiscal), 'padrón devuelve nombre, domicilio, condición IVA e id', r.json);
+  eq(r.json.source, 'ws_sr_constancia_inscripcion', 'se consulta PRIMERO la constancia de inscripción (la que trae impuestos)');
+  ok(state.wsaaCalls === wsaaAntesPadron + 1, 'con la constancia alcanzó: un solo TA, A13 ni se consultó', { wsaaCalls: state.wsaaCalls - wsaaAntesPadron });
   r = await call('/api/padron?cuit=123&entity=1', { method: 'GET' });
   eq(r.status, 400, 'CUIT corto → 400');
+  state.padronMode = 'cifail-a13';
+  r = await call('/api/padron?cuit=30-71745468-1&entity=1', { method: 'GET' });
+  ok(r.status === 200 && r.json.success && r.json.source === 'ws_sr_padron_a13' && r.json.nombre === 'EMPRESA DE PRUEBA S.A.', 'si la constancia falla, A13 de respaldo da el nombre', r.json);
+  ok(r.json.condIvaId === 0 && r.json.condIva === 'No determinada' && r.json.condIvaDeterminada === false, '...pero la condición IVA queda "No determinada", NO consumidor final', r.json);
   state.padronMode = 'fail';
   r = await call('/api/padron?cuit=20344412171&entity=1', { method: 'GET' });
-  eq(r.status, 404, 'sin datos en A13 ni constancia → 404');
-  state.padronMode = 'a13';
-  ok(state.wsaaCalls === 2 + 2, 'el padrón pidió TA propios (a13 y constancia) una vez cada uno', { wsaaCalls: state.wsaaCalls });
+  eq(r.status, 404, 'sin datos en constancia ni A13 → 404');
+  state.padronMode = 'ok';
+  ok(state.wsaaCalls === wsaaAntesPadron + 2, 'el padrón pidió TA propios (constancia y a13) una vez cada uno', { wsaaCalls: state.wsaaCalls - wsaaAntesPadron });
 
   console.log('\n═══ 15. Clave compartida (x-api-key) cuando está definida ═══');
   UID = 'uid-seccion-15';
@@ -376,7 +383,7 @@ async function main() {
   console.log('\n═══ 17. Logs sin datos personales ═══');
   UID = 'uid-seccion-17';
   ok(!/EMPRESA DE PRUEBA|SIEMPRE VIVA/.test(salida1), 'el log del padrón no muestra nombre ni domicilio');
-  ok(/\[PADRON\] 30717454681 ✅ a13 \(Responsable Inscripto\)/.test(salida1), 'el log del padrón muestra CUIT, fuente y condición');
+  ok(/\[PADRON\] 30717454681 ✅ constancia \(Responsable Inscripto\)/.test(salida1), 'el log del padrón muestra CUIT, fuente y condición');
   ok(!/eyJ/.test(salida1), 'el log no muestra tokens');
   ok(/\[FC\] ✅ B 3-122 CAE \d{14} — carboys\.cba@gmail\.com \/ Lisandro/.test(salida1), 'el log de emisión identifica gmail y usuario de la tablet');
 

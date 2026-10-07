@@ -104,16 +104,38 @@ console.log('═══ validarComprobante (redondeos y bordes) ═══');
 
 console.log('═══ extractPadronData ═══');
 {
+  const CI = 'ws_sr_constancia_inscripcion', A13 = 'ws_sr_padron_a13';
+  // Constancia de inscripción (A5): trae impuestos
   const fis = '<persona><tipoPersona>FISICA</tipoPersona><apellido>PEREZ</apellido><nombre>JUAN</nombre><domicilio><direccion>CALLE 1</direccion><localidad>CORDOBA</localidad><codPostal>5000</codPostal></domicilio><impuesto><idImpuesto>20</idImpuesto></impuesto></persona>';
-  const r = S.extractPadronData(fis, '20123456789', 'a13');
-  ok(r.nombre === 'PEREZ JUAN' && r.condIva === 'Monotributo' && r.condIvaId === 6 && r.domicilioFiscal === 'CALLE 1, CORDOBA, CP 5000', 'persona física monotributista', r);
-  const ex = S.extractPadronData(fis.replace('<idImpuesto>20</idImpuesto>', '<idImpuesto>32</idImpuesto>'), '20123456789', 'a13');
-  ok(ex.condIva === 'IVA Exento' && ex.condIvaId === 4, 'exento → 4');
-  const cf = S.extractPadronData(fis.replace('<impuesto><idImpuesto>20</idImpuesto></impuesto>', ''), '20123456789', 'a13');
-  ok(cf.condIva === 'Consumidor Final' && cf.condIvaId === 5, 'sin impuestos → consumidor final 5');
-  const ri = S.extractPadronData(fis.replace('<idImpuesto>20</idImpuesto>', '<idImpuesto>30</idImpuesto>'), '20123456789', 'a13');
-  ok(ri.condIva === 'Responsable Inscripto' && ri.condIvaId === 1, 'IVA 30 → RI 1');
-  let lanzo = false; try { S.extractPadronData('<persona/>', '1', 'a13'); } catch (e) { lanzo = true; }
+  const r = S.extractPadronData(fis, '20123456789', CI);
+  ok(r.nombre === 'PEREZ JUAN' && r.condIva === 'Monotributo' && r.condIvaId === 6 && r.condIvaDeterminada === true && r.domicilioFiscal === 'CALLE 1, CORDOBA, CP 5000', 'constancia: persona física monotributista', r);
+  const ex = S.extractPadronData(fis.replace('<idImpuesto>20</idImpuesto>', '<idImpuesto>32</idImpuesto>'), '20123456789', CI);
+  ok(ex.condIva === 'IVA Exento' && ex.condIvaId === 4, 'constancia: exento → 4');
+  const cf = S.extractPadronData(fis.replace('<impuesto><idImpuesto>20</idImpuesto></impuesto>', ''), '20123456789', CI);
+  ok(cf.condIva === 'Consumidor Final' && cf.condIvaId === 5 && cf.condIvaDeterminada === true, 'constancia: persona física sin impuestos → consumidor final 5');
+  const ri = S.extractPadronData(fis.replace('<idImpuesto>20</idImpuesto>', '<idImpuesto>30</idImpuesto>'), '20123456789', CI);
+  ok(ri.condIva === 'Responsable Inscripto' && ri.condIvaId === 1, 'constancia: IVA 30 → RI 1');
+  // Constancia v2 real: el monotributo viene en <datosMonotributo> (con o sin idImpuesto 20)
+  const monoV2 = '<personaReturn><datosGenerales><tipoPersona>FISICA</tipoPersona><apellido>GOMEZ</apellido><nombre>ANA</nombre></datosGenerales><datosMonotributo><categoriaMonotributo><descripcionCategoria>B</descripcionCategoria></categoriaMonotributo></datosMonotributo></personaReturn>';
+  const m2 = S.extractPadronData(monoV2, '27123456789', CI);
+  ok(m2.condIvaId === 6, 'constancia v2: <datosMonotributo> → Monotributo', m2);
+  // Empresa RI: lo normal (impuesto 30 dentro de datosRegimenGeneral)
+  const empRI = '<personaReturn><datosGenerales><tipoPersona>JURIDICA</tipoPersona><razonSocial>RDA RENTING S.A.</razonSocial></datosGenerales><datosRegimenGeneral><impuesto><idImpuesto>30</idImpuesto><descripcionImpuesto>IVA</descripcionImpuesto></impuesto><impuesto><idImpuesto>10</idImpuesto></impuesto></datosRegimenGeneral></personaReturn>';
+  const e1 = S.extractPadronData(empRI, '30123456789', CI);
+  ok(e1.nombre === 'RDA RENTING S.A.' && e1.condIvaId === 1 && e1.condIva === 'Responsable Inscripto', 'constancia: empresa con IVA 30 → RI (Factura A)', e1);
+  // Empresa SIN impuesto de IVA en la constancia: nunca "consumidor final"
+  const empSin = empRI.replace('<impuesto><idImpuesto>30</idImpuesto><descripcionImpuesto>IVA</descripcionImpuesto></impuesto>', '');
+  const e2 = S.extractPadronData(empSin, '30123456789', CI);
+  ok(e2.condIvaId === 0 && e2.condIva === 'No determinada' && e2.condIvaDeterminada === false, 'constancia: empresa sin IVA → "No determinada", nunca consumidor final', e2);
+  // Padrón A13: NO trae impuestos → la condición no se inventa
+  const a13 = '<persona><tipoPersona>JURIDICA</tipoPersona><razonSocial>RDA RENTING S.A.</razonSocial><domicilio><direccion>AV 1</direccion><localidad>CORDOBA</localidad></domicilio></persona>';
+  const r13 = S.extractPadronData(a13, '30123456789', A13);
+  ok(r13.nombre === 'RDA RENTING S.A.' && r13.condIvaId === 0 && r13.condIva === 'No determinada' && r13.condIvaDeterminada === false, 'A13 (sin impuestos): nombre sí, condición "No determinada" (antes salía Consumidor Final)', r13);
+  const f13 = S.extractPadronData('<persona><tipoPersona>FISICA</tipoPersona><apellido>PEREZ</apellido><nombre>JUAN</nombre></persona>', '20123456789', A13);
+  ok(f13.condIvaId === 0, 'A13 persona física: tampoco se asume consumidor final', f13);
+  const a13con = S.extractPadronData(a13.replace('</persona>', '<impuesto><idImpuesto>30</idImpuesto></impuesto></persona>'), '30123456789', A13);
+  ok(a13con.condIvaId === 1, 'si A13 algún día trae impuestos, se usan', a13con);
+  let lanzo = false; try { S.extractPadronData('<persona/>', '1', CI); } catch (e) { lanzo = true; }
   ok(lanzo, 'sin datos → lanza');
 }
 console.log(`\n══════ UNITARIAS: ${pasadas} pasadas, ${falladas} falladas ══════`);
